@@ -81,6 +81,7 @@ IDLE_TIMEOUT = float(os.environ.get("MLX_IDLE_TIMEOUT", "300"))  # s; 0/neg = ne
 MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", "4"))  # safety ceiling
 MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", "2.0"))  # headroom to evict a model
 MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # floor to drop KV cache
+DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", "8.0"))  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
 _KVB = os.environ.get("MLX_KV_BITS")  # 8/4 = quantize KV cache
@@ -126,6 +127,7 @@ def _tune_memory():
 # ---- model state (mutated ONLY by the worker; _reg_lock guards the structure) ----
 _reg_lock = threading.Lock()
 _chat = {}  # name -> {model, tok, size_gb, last, ka}
+_sizes = {}  # name -> measured resident size_gb from a prior load (for pre-load estimates)
 _ac = {"model": None, "tok": None}  # autocomplete (fixed)
 _em = {"model": None, "proc": None}  # embed (fixed)
 
@@ -174,6 +176,81 @@ def _evict(name):
 
 def _free_gb():
     return psutil.virtual_memory().available / 1024**3 if psutil else None
+
+
+def _weights_dir(mlx_id):
+    """Directory holding a model's weight files: a local path, or its HF cache snapshot."""
+    if os.path.isdir(mlx_id):
+        return mlx_id
+    # HF hub layout: <cache>/hub/models--<org>--<name>/snapshots/<rev>/*.safetensors
+    base = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+    hub = base if base.rstrip("/").endswith("hub") else os.path.join(base, "hub")
+    snaps = os.path.join(hub, "models--" + mlx_id.replace("/", "--"), "snapshots")
+    if not os.path.isdir(snaps):
+        return None
+    best = None
+    for rev in os.listdir(snaps):
+        d = os.path.join(snaps, rev)
+        if os.path.isdir(d) and any(f.endswith(".safetensors") for f in os.listdir(d)):
+            best = d  # normally exactly one snapshot with weights
+    return best
+
+
+def _dir_weight_gb(d):
+    """Sum of the *.safetensors sizes in a dir (GB), following symlinks to the HF blobs."""
+    total = 0
+    try:
+        for f in os.listdir(d):
+            if f.endswith(".safetensors"):
+                try:
+                    total += os.path.getsize(os.path.join(d, f))
+                except OSError:
+                    pass
+    except OSError:
+        return None
+    return total / 1024**3 if total else None
+
+
+def _estimate_size_gb(name):
+    """Best estimate of a model's resident size (GB) BEFORE loading it: a real
+    measurement from a prior load this session, else its on-disk weight size, else
+    the largest hot model (or DEFAULT_EST_GB). Used for proactive admission control."""
+    if name in _sizes:
+        return _sizes[name]
+    d = _weights_dir(CFG[name]["mlx"]) if name in CFG else None
+    est = _dir_weight_gb(d) if d else None
+    if est is not None:
+        return est
+    with _reg_lock:
+        hot = [m["size_gb"] for m in _chat.values()]
+    return max(hot) if hot else DEFAULT_EST_GB
+
+
+def _make_room(name, est):
+    """Proactively evict LRU chat models BEFORE loading `name`, so the incoming model
+    fits the budget: free-after-load >= MIN_FREE_GB and runners <= MAX_RUNNERS. This is
+    the admission gate — it runs before the (memory-spiking) load, so a second big model
+    can't overflow RAM during load and then get evicted too late. Runs on the worker."""
+    free = _free_gb()
+    while True:
+        with _reg_lock:
+            others = sorted((x for x in _chat if x != name), key=lambda x: _chat[x]["last"])
+            n_after = len(_chat) + (0 if name in _chat else 1)
+            short = free is not None and (free - est) < MIN_FREE_GB
+            if not others or (not short and n_after <= MAX_RUNNERS):
+                return
+            victim = others[0]
+            vsize = _chat[victim]["size_gb"]
+        print(
+            f"[router] admission: evicting LRU {victim} (~{vsize:.1f}GB) to fit "
+            f"{name} (~{est:.1f}GB, free {free:.1f}GB)"
+            if free is not None
+            else f"[router] admission: evicting LRU {victim} to fit {name}",
+            flush=True,
+        )
+        _evict(victim)
+        if free is not None:
+            free += vsize  # expected recovery
 
 
 def _cache_bytes(pc):
@@ -254,6 +331,7 @@ def chat_model(name):
             m["last"] = time.monotonic()
             return m["model"], m["tok"], m["vlm"]
     vlm = bool(CFG[name].get("vision"))
+    _make_room(name, _estimate_size_gb(name))  # admission control: evict BEFORE loading
     before = mx.get_active_memory()
     print(f"[router] {'vlm' if vlm else 'chat'}: loading {name} ...", flush=True)
     if vlm:
@@ -272,6 +350,7 @@ def chat_model(name):
                 pass
     mx.eval([v for _, v in tree_flatten(model.parameters())])  # materialize to measure
     size = _gb(mx.get_active_memory() - before)
+    _sizes[name] = size  # remember the real size for the next admission estimate
     with _reg_lock:
         _chat[name] = {
             "model": model,
@@ -844,9 +923,7 @@ def _run_chat(job):
                 job.out.put(("delta", tail))
         _store_cache(name, ptoks + gen_ids, cache)  # slot reflects prompt+generation
         if reused:
-            print(
-                f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True
-            )
+            print(f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
         if tools:
             calls, content = _parse_tool_calls(prefill + "".join(buf))
             if calls:
