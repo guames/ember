@@ -24,6 +24,9 @@ First public release. Extracted and hardened from a private MLX benchmarking pro
 - Memory tuning: 8-bit KV cache, chunked prefill, wired-memory pinning.
 - File-based model registry (`ember.yaml` / `EMBER_CONFIG`).
 - Management **CLI** with `--help` for every command: `serve`, `ps`, `list`, `status`,
-  `memory`, `run`, `warm`, `unload`, `config`, `version`.
+  `memory`, `run`, `warm`, `unload`, `clear`, `config`, `version`.
+- `POST /clear` (and `ember clear`): drop prompt cache / MLX buffer pool without
+  unloading models.
+- Benchmarks: [docs/benchmarks.md](docs/benchmarks.md) (Apple M5 24 GB — tok/s & RAM).
 
 [0.1.0]: https://github.com/gustavoames/ember/releases/tag/v0.1.0

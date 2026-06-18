@@ -36,6 +36,25 @@ backend…). Ember's niche is being the **unified, memory-adaptive** one for a s
 
 ---
 
+## Benchmarks
+
+Measured on an **Apple M5, 24 GB** (MLX). Generation is memory-bandwidth bound, so MoE
+models fly while dense 30B-class models trade speed for quality:
+
+| Model | Quant | tok/s | RAM |
+|---|---|--:|--:|
+| DeepSeek-Coder-V2-16B (MoE) | 4-bit | **77** | 9 GB |
+| Qwen3-30B-A3B (MoE) | 3-bit | **68** | 13 GB |
+| Qwen3-8B | 3-bit | 36 | 4 GB |
+| Phi-4-14B | 3-bit | 19 | 6 GB |
+| Qwen2.5-Coder-32B | 3-bit | 8 | 15 GB |
+
+Optimizations (measured): prompt cache cuts **TTFT ~5×** (396 → 80 ms on a 1.3k-token
+prompt); chunked prefill drops peak RAM ~19 %; 8-bit KV cache is ~2× smaller.
+
+➡️ Full tables (all 18 configs, KV-cache memory per model, Ollama comparison) in
+[docs/benchmarks.md](docs/benchmarks.md).
+
 ## Requirements
 
 - macOS on **Apple Silicon** (M-series).
