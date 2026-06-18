@@ -69,13 +69,13 @@ backend…). Ember's niche is being the **unified, memory-adaptive** one for a s
 Measured on an **Apple M5, 24 GB** (MLX). Generation is memory-bandwidth bound, so MoE
 models fly while dense 30B-class models trade speed for quality:
 
-| Model | Quant | tok/s | RAM · MLX | RAM · Ollama |
-|---|---|--:|--:|--:|
-| DeepSeek-Coder-V2-16B (MoE) | 4-bit | **77** | **9 GB** | 11 GB |
-| Qwen3-30B-A3B (MoE) | 3-bit | **68** | **13 GB** | 15 GB |
-| Qwen3-8B | 3-bit | 36 | **4 GB** | 7 GB |
-| Phi-4-14B | 3-bit | 19 | **6 GB** | 10 GB |
-| Qwen2.5-Coder-32B | 3-bit | 8 | **15 GB** | 16 GB |
+| Model | Quant | tok/s · MLX | tok/s · Ollama | MLX faster | RAM · MLX | RAM · Ollama | MLX lighter |
+|---|---|--:|--:|--:|--:|--:|--:|
+| DeepSeek-Coder-V2-16B (MoE) | 4-bit | **77** | 68 | **+13%** | **9 GB** | 11 GB | **−18%** |
+| Qwen3-30B-A3B (MoE) | 3-bit | **68** | 56 | **+21%** | **13 GB** | 15 GB | **−13%** |
+| Qwen3-8B | 3-bit | **36** | 30 | **+20%** | **4 GB** | 7 GB | **−43%** |
+| Phi-4-14B | 3-bit | **19** | 16 | **+19%** | **6 GB** | 10 GB | **−40%** |
+| Qwen2.5-Coder-32B | 3-bit | 8 | 8 | ±0% | **15 GB** | 16 GB | **−6%** |
 
 Optimizations (measured): prompt cache cuts **TTFT ~5×** (396 → 80 ms on a 1.3k-token
 prompt); chunked prefill drops peak RAM ~19 %; 8-bit KV cache is ~2× smaller.
@@ -182,7 +182,7 @@ Ember ships a small CLI. Run `ember --help` or `ember <command> --help` for deta
 
 ```console
 $ ember ps
-MODELO                            TAM  VISÃO  OCIOSO   KEEP   CACHE
+MODEL                            SIZE  VISION    IDLE   KEEP   CACHE
 qwen3-8b                         3.3G      -      0s   5.0m      50
 
 $ echo "refactor this loop" | ember run qwen3-8b
