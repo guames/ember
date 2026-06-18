@@ -85,6 +85,33 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
 }'
 ```
 
+## Manage it from the terminal
+
+Ember ships a small CLI. Run `ember --help` or `ember <command> --help` for details.
+
+| Command | What it does |
+|---|---|
+| `ember serve` | start the server (`--host` `--port` `--config`) |
+| `ember ps` | list **hot** models in RAM (size, idle, keep-alive, cached tokens) |
+| `ember list` | list **configured** models and which are hot |
+| `ember status` | full status: models + memory + queue + policy |
+| `ember memory` | memory breakdown (MLX + system) |
+| `ember run <model> [prompt]` | one-off streamed chat (prompt via arg or stdin) |
+| `ember warm <model>` | preload a model into RAM (no generation) |
+| `ember unload [target]` | unload `chat` (default) / `all` / `<model>` |
+| `ember config` | show the resolved config file and validate models |
+| `ember version` | print the version |
+
+```console
+$ ember ps
+MODELO                            TAM  VISÃO  OCIOSO   KEEP   CACHE
+qwen3-8b                         3.3G      -      0s   5.0m      50
+
+$ echo "refactor this loop" | ember run qwen3-8b
+```
+
+Management commands talk to a running server (`--url`, default `http://127.0.0.1:8000`).
+
 ## Endpoints
 
 | Endpoint | Purpose |

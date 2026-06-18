@@ -23,5 +23,7 @@ First public release. Extracted and hardened from a private MLX benchmarking pro
   `repetition_penalty`, `presence_penalty`, `frequency_penalty`, `logit_bias`.
 - Memory tuning: 8-bit KV cache, chunked prefill, wired-memory pinning.
 - File-based model registry (`ember.yaml` / `EMBER_CONFIG`).
+- Management **CLI** with `--help` for every command: `serve`, `ps`, `list`, `status`,
+  `memory`, `run`, `warm`, `unload`, `config`, `version`.
 
 [0.1.0]: https://github.com/gustavoames/ember/releases/tag/v0.1.0

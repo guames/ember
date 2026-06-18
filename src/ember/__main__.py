@@ -1,6 +1,6 @@
-"""Permite `python -m ember`."""
+"""Permite `python -m ember` (mesma CLI do executável `ember`)."""
 
-from .server import main
+from .cli import main
 
 if __name__ == "__main__":
     main()

@@ -1192,12 +1192,19 @@ class Handler(BaseHTTPRequestHandler):
         )
 
 
-def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else int(os.environ.get("MLX_ROUTER_PORT", "8000"))
-    host = os.environ.get("MLX_ROUTER_HOST", "127.0.0.1")
+def serve(host=None, port=None):
+    """Sobe o servidor HTTP e bloqueia (serve_forever)."""
+    if port is None:
+        port = (
+            int(sys.argv[1])
+            if len(sys.argv) > 1
+            else int(os.environ.get("MLX_ROUTER_PORT", "8000"))
+        )
+    if host is None:
+        host = os.environ.get("MLX_ROUTER_HOST", "127.0.0.1")
     idle = f"{IDLE_TIMEOUT:.0f}s" if IDLE_TIMEOUT > 0 else "off"
     print(
-        f"[router] all-MLX em http://{host}:{port}/v1  (chat:{len(CFG)} + ac + embed)  "
+        f"[ember] http://{host}:{port}/v1  (chat:{len(CFG)} + ac + embed)  "
         f"[runners<={MAX_RUNNERS}, min_free={MIN_FREE_GB:.1f}GB, idle={idle}, "
         f"queue<={MAX_QUEUE}]",
         flush=True,
@@ -1206,6 +1213,10 @@ def main():
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
     ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+
+def main():
+    serve()
 
 
 if __name__ == "__main__":
