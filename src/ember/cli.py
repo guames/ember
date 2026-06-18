@@ -184,6 +184,12 @@ def cmd_unload(args):
     print(f"descarregado: {', '.join(freed) if freed else 'nada'}")
 
 
+def cmd_clear(args):
+    res = _call(args.url, "/clear", "POST", {"target": args.target})
+    cleared = res.get("cleared") or []
+    print(f"limpo ({args.target}): {', '.join(cleared) if cleared else 'nada'}")
+
+
 def cmd_config(args):
     from .registry import _find_config, load_registry
 
@@ -244,6 +250,19 @@ def build_parser():
 
     u = add("unload", cmd_unload, "Descarrega modelos: chat (default) | all | <nome>.")
     u.add_argument("target", nargs="?", default="chat", help="chat | all | <nome do modelo>")
+
+    c = add(
+        "clear",
+        cmd_clear,
+        "Limpa contexto (prompt cache) e/ou cache do MLX — mantém os modelos quentes.",
+    )
+    c.add_argument(
+        "target",
+        nargs="?",
+        default="all",
+        choices=["context", "cache", "all"],
+        help="context (KV da conversa) | cache (buffers MLX) | all (default)",
+    )
 
     add(
         "config", cmd_config, "Mostra o arquivo de config resolvido e valida os modelos.", url=False

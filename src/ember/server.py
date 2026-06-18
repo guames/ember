@@ -53,7 +53,6 @@ import json
 import os
 import queue
 import re
-import sys
 import threading
 import time
 import uuid
@@ -902,6 +901,29 @@ def _run_unload(job):
     job.out.put(("result", freed))
 
 
+def _run_clear(job):
+    """Limpa contexto/cache SEM descarregar modelos (chamado só no worker).
+    'context' = dropa o prompt cache (KV da conversa) de todos os runners; o modelo fica
+    quente e a próxima chamada reprocessa o prompt. 'cache' = esvazia o pool de buffers do
+    MLX (mx.clear_cache) e zera o pico. 'all' = os dois."""
+    target = job.payload["target"]
+    cleared = []
+    if target in ("context", "all"):
+        with _reg_lock:
+            names = [n for n, m in _chat.items() if m.get("pc") is not None]
+            for n in names:
+                _chat[n]["pc"] = _chat[n]["pctoks"] = None
+        if names:
+            cleared.append("prompt-cache: " + ", ".join(names))
+        gc.collect()
+    if target in ("cache", "all"):
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        cleared.append("mlx-buffer-pool")
+    print(f"[ember] clear({target}) -> {cleared or 'nada'}", flush=True)
+    job.out.put(("result", cleared))
+
+
 def _run_evict(job):
     now = time.monotonic()
     with _reg_lock:
@@ -923,6 +945,7 @@ def _dispatch(job):
         "fim": _run_fim,
         "embed": _run_embed,
         "unload": _run_unload,
+        "clear": _run_clear,
         "evict": _run_evict,
     }[job.kind](job)
 
@@ -1023,6 +1046,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._embeddings(body)
             elif path.endswith("/unload"):
                 self._unload(body)
+            elif path.endswith("/clear"):
+                self._clear(body)
             else:
                 self._json(404, {"error": "not found"})
         except BrokenPipeError:
@@ -1191,15 +1216,27 @@ class Handler(BaseHTTPRequestHandler):
             {"target": target, "unloaded": freed, "memory_before": before, "memory_after": _mem()},
         )
 
+    # ---- clear (contexto/cache, sem descarregar modelos) ----
+    def _clear(self, body):
+        target = body.get("target", "all")
+        if target not in ("context", "cache", "all"):
+            return self._json(400, {"error": "target deve ser context|cache|all"})
+        before = _mem()
+        job = _submit(P_SHORT, "clear", {"target": target})
+        if job is None:
+            return self._json(503, {"error": "fila cheia (maxQueue)"})
+        kind, data = job.out.get()
+        cleared = data if kind == "result" else []
+        self._json(
+            200,
+            {"target": target, "cleared": cleared, "memory_before": before, "memory_after": _mem()},
+        )
+
 
 def serve(host=None, port=None):
     """Sobe o servidor HTTP e bloqueia (serve_forever)."""
     if port is None:
-        port = (
-            int(sys.argv[1])
-            if len(sys.argv) > 1
-            else int(os.environ.get("MLX_ROUTER_PORT", "8000"))
-        )
+        port = int(os.environ.get("MLX_ROUTER_PORT", "8000"))
     if host is None:
         host = os.environ.get("MLX_ROUTER_HOST", "127.0.0.1")
     idle = f"{IDLE_TIMEOUT:.0f}s" if IDLE_TIMEOUT > 0 else "off"

@@ -18,6 +18,7 @@ def test_build_parser_has_all_commands():
         "run",
         "warm",
         "unload",
+        "clear",
         "config",
         "version",
     ]:
@@ -34,6 +35,13 @@ def test_run_parses_model_and_optional_prompt():
 def test_unload_defaults_to_chat():
     assert cli.build_parser().parse_args(["unload"]).target == "chat"
     assert cli.build_parser().parse_args(["unload", "all"]).target == "all"
+
+
+def test_clear_defaults_to_all_and_validates_choices():
+    assert cli.build_parser().parse_args(["clear"]).target == "all"
+    assert cli.build_parser().parse_args(["clear", "context"]).target == "context"
+    with pytest.raises(SystemExit):  # choice inválido
+        cli.build_parser().parse_args(["clear", "modelo-x"])
 
 
 def test_serve_flags():
