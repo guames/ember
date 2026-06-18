@@ -1,4 +1,4 @@
-"""Testes do registro de modelos (puro — não importa MLX, roda em qualquer SO)."""
+"""Model registry tests (pure — no MLX import, runs on any OS)."""
 
 import json
 
@@ -14,8 +14,8 @@ def _write(tmp_path, data, name="ember.json"):
 
 
 def test_defaults_when_no_file():
-    cfg, ac, em = load_registry(path=None)  # sem arquivo -> defaults
-    assert cfg  # ao menos um modelo de chat
+    cfg, ac, em = load_registry(path=None)  # no file -> defaults
+    assert cfg  # at least one chat model
     assert "mlx" in ac and "mlx" in em
 
 
@@ -42,17 +42,17 @@ def test_loads_models_and_flags(tmp_path):
 def test_autocomplete_embed_fall_back_to_defaults(tmp_path):
     path = _write(tmp_path, {"models": [{"name": "c", "mlx": "org/C"}]})
     _, ac, em = load_registry(path=path)
-    assert "mlx" in ac and "mlx" in em  # preenchidos pelos defaults
+    assert "mlx" in ac and "mlx" in em  # filled in by the defaults
 
 
 def test_invalid_model_raises(tmp_path):
-    path = _write(tmp_path, {"models": [{"name": "x"}]})  # falta "mlx"
+    path = _write(tmp_path, {"models": [{"name": "x"}]})  # missing "mlx"
     with pytest.raises(ValueError):
         load_registry(path=path)
 
 
 def test_missing_env_config_raises(monkeypatch):
-    monkeypatch.setenv("EMBER_CONFIG", "/nao/existe/ember.yaml")
+    monkeypatch.setenv("EMBER_CONFIG", "/does/not/exist/ember.yaml")
     from ember.registry import _find_config
 
     with pytest.raises(FileNotFoundError):

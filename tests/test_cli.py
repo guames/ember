@@ -1,4 +1,4 @@
-"""Testes do CLI (parser e helpers — não importam MLX/servidor)."""
+"""CLI tests (parser and helpers — no MLX/server import)."""
 
 import pytest
 
@@ -7,7 +7,7 @@ from ember import cli
 
 def test_build_parser_has_all_commands():
     p = cli.build_parser()
-    # extrai os nomes dos subcomandos registrados
+    # extract the names of the registered subcommands
     sub = next(a for a in p._actions if getattr(a, "choices", None) and "serve" in a.choices)
     for name in [
         "serve",
@@ -40,8 +40,8 @@ def test_unload_defaults_to_chat():
 def test_clear_defaults_to_all_and_validates_choices():
     assert cli.build_parser().parse_args(["clear"]).target == "all"
     assert cli.build_parser().parse_args(["clear", "context"]).target == "context"
-    with pytest.raises(SystemExit):  # choice inválido
-        cli.build_parser().parse_args(["clear", "modelo-x"])
+    with pytest.raises(SystemExit):  # invalid choice
+        cli.build_parser().parse_args(["clear", "model-x"])
 
 
 def test_serve_flags():
@@ -70,4 +70,4 @@ def test_help_exits_zero():
 def test_no_command_prints_help(capsys):
     cli.main([])
     out = capsys.readouterr().out
-    assert "ember" in out and "<comando>" in out
+    assert "ember" in out and "<command>" in out

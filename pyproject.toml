@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "ember-mlx"
 version = "0.1.0"
-description = "Servidor de inferência MLX OpenAI-compatible para Apple Silicon: chat, tools, visão, embeddings e autocomplete em um processo, com memória adaptativa."
+description = "OpenAI-compatible MLX inference server for Apple Silicon: chat, tools, vision, embeddings and autocomplete in one process, with adaptive memory."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -27,7 +27,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Visão (mlx-vlm) e saída estruturada/response_format (llguidance via mlx_vlm.structured).
+# Vision (mlx-vlm) and structured output/response_format (llguidance via mlx_vlm.structured).
 vision = ["mlx-vlm>=0.1", "llguidance>=0.7"]
 dev = ["pytest>=7", "ruff>=0.5"]
 

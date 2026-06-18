@@ -1,41 +1,41 @@
-"""Ember — servidor de inferência MLX OpenAI-compatible p/ Apple Silicon.
+"""Ember — OpenAI-compatible MLX inference server for Apple Silicon.
 
-Um processo, três capacidades, uma política de memória (multi-runner, keep_alive,
-preempção, prompt cache). Pensado p/ assistentes de código locais (ex.: Continue).
+One process, three capabilities, one memory policy (multi-runner, keep_alive,
+preemption, prompt cache). Built for local coding assistants (e.g. Continue).
 
-Serve 3 capacidades, todas MLX:
-  • /v1/chat/completions  -> modelo de chat/código (multi-runner com budget de RAM;
-                             aceita `tools`/`tool_choice` OpenAI e devolve tool_calls)
-  • /v1/completions       -> autocomplete FIM (Qwen2.5-Coder-1.5B base, fixo na RAM)
-  • /v1/embeddings        -> embeddings (nomic-modernbert, fixo na RAM)
-Operacao/observabilidade:
-  • GET  /status          -> modelos quentes + memória + fila + política
-  • GET  /memory          -> memória MLX e do sistema (em uso / livre)
-  • POST /unload {target}  -> descarrega ('chat' | 'all' | '<nome-do-modelo>')
+Serves 3 capabilities, all on MLX:
+  • /v1/chat/completions  -> chat/code model (multi-runner with a RAM budget;
+                             accepts OpenAI `tools`/`tool_choice` and returns tool_calls)
+  • /v1/completions       -> FIM autocomplete (Qwen2.5-Coder-1.5B base, pinned in RAM)
+  • /v1/embeddings        -> embeddings (nomic-modernbert, pinned in RAM)
+Operations/observability:
+  • GET  /status          -> hot models + memory + queue + policy
+  • GET  /memory          -> MLX and system memory (in use / free)
+  • POST /unload {target}  -> unload ('chat' | 'all' | '<model-name>')
 
-Robustez estilo Ollama (1 worker de GPU + fila com prioridade):
-  - autocomplete/embed têm prioridade e furam a fila do chat (rodam ENTRE os
-    tokens do chat -> digitar não trava durante a geração);
-  - maxQueue rejeita com 503 quando sobrecarregado; cancela se o cliente cai;
-  - multi-runner: mantém >1 modelo de chat quente enquanto sobrar >= MLX_MIN_FREE_GB
-    de RAM livre (e <= MLX_MAX_RUNNERS, teto de segurança); LRU evicta o resto;
-  - keep_alive: idle-unload por modelo (env MLX_IDLE_TIMEOUT, ou campo keep_alive
-    por requisição). A próxima chamada recarrega sozinho.
+Ollama-style robustness (1 GPU worker + priority queue):
+  - autocomplete/embed have priority and jump the chat queue (they run BETWEEN the
+    chat tokens -> typing doesn't stall during generation);
+  - maxQueue rejects with 503 when overloaded; cancels if the client drops;
+  - multi-runner: keeps >1 chat model hot while there's >= MLX_MIN_FREE_GB of free
+    RAM (and <= MLX_MAX_RUNNERS, a safety ceiling); LRU evicts the rest;
+  - keep_alive: per-model idle-unload (env MLX_IDLE_TIMEOUT, or per-request keep_alive
+    field). The next call reloads it automatically.
 
-Prompt cache (KV reuse, estilo Ollama/llama.cpp): cada runner mantém 1 slot de KV
-cache; a cada request reusa o maior prefixo comum de tokens (system+histórico) e só
-processa o sufixo novo -> corta TTFT em conversas/edições. Zero deepcopy. MLX_PROMPT_CACHE=0 desliga.
+Prompt cache (KV reuse, Ollama/llama.cpp-style): each runner keeps 1 KV cache slot;
+on every request it reuses the longest common prefix of tokens (system+history) and only
+processes the new suffix -> cuts TTFT in conversations/edits. Zero deepcopy. MLX_PROMPT_CACHE=0 turns it off.
 
-Sob pressão de RAM (free < MLX_MIN_FREE_CACHE_GB, default 1GB) o router larga os KV
-caches (LRU, mais antigo primeiro) ANTES de evictar um modelo inteiro.
+Under RAM pressure (free < MLX_MIN_FREE_CACHE_GB, default 1GB) the router drops the KV
+caches (LRU, oldest first) BEFORE evicting a whole model.
 
-KV cache quantizado (opcional, mais contexto na mesma RAM): MLX_KV_BITS=8 (ou 4) liga;
-8-bit é ~2x menor que fp16 e praticamente lossless. Compatível com o prompt cache (o
-QuantizedKVCache é trimável). Desligado por padrão.
+Quantized KV cache (optional, more context in the same RAM): MLX_KV_BITS=8 (or 4) enables it;
+8-bit is ~2x smaller than fp16 and practically lossless. Compatible with the prompt cache (the
+QuantizedKVCache is trimmable). Off by default.
 
-Tuning de memória no boot: wired_limit (pesos residentes, sem compressão do SO perto do
-limite) + prefill chunkado (MLX_PREFILL_STEP, pico de RAM ↓ no prompt longo a frio; com
-o prompt cache o prefill normal já é só o sufixo, então quase não custa).
+Memory tuning at boot: wired_limit (resident weights, no OS compression near the
+limit) + chunked prefill (MLX_PREFILL_STEP, peak RAM ↓ on a cold long prompt; with
+the prompt cache the normal prefill is already just the suffix, so it barely costs anything).
 
 Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MAX_RUNNERS(4) MLX_MIN_FREE_GB(2.0) MLX_MIN_FREE_CACHE_GB(1.0)
@@ -43,7 +43,7 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto)
       MLX_CACHE_LIMIT_GB(off)
 
-    ember                          # CLI (porta 8000 ou env MLX_ROUTER_PORT)
+    ember                          # CLI (port 8000 or env MLX_ROUTER_PORT)
     python -m ember
 """
 
@@ -71,30 +71,30 @@ try:
 except Exception:  # noqa: BLE001
     psutil = None
 
-# Registro de modelos (arquivo de config; ver registry.py). CFG = chat/código/visão.
+# Model registry (config file; see registry.py). CFG = chat/code/vision.
 CFG, _AC, _EM = load_registry()
-AC_NAME, AC_REPO = _AC["name"], _AC["mlx"]  # autocomplete FIM (fixo na RAM)
-EM_NAME, EM_REPO = _EM["name"], _EM["mlx"]  # embeddings (fixo na RAM)
+AC_NAME, AC_REPO = _AC["name"], _AC["mlx"]  # FIM autocomplete (pinned in RAM)
+EM_NAME, EM_REPO = _EM["name"], _EM["mlx"]  # embeddings (pinned in RAM)
 
-# ---- política (envs) ----
-IDLE_TIMEOUT = float(os.environ.get("MLX_IDLE_TIMEOUT", "300"))  # s; 0/neg = nunca
-MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", "4"))  # teto de segurança
-MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", "2.0"))  # headroom p/ evictar modelo
-MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # piso p/ largar KV cache
+# ---- policy (envs) ----
+IDLE_TIMEOUT = float(os.environ.get("MLX_IDLE_TIMEOUT", "300"))  # s; 0/neg = never
+MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", "4"))  # safety ceiling
+MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", "2.0"))  # headroom to evict a model
+MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # floor to drop KV cache
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
-_KVB = os.environ.get("MLX_KV_BITS")  # 8/4 = quantiza KV cache
+_KVB = os.environ.get("MLX_KV_BITS")  # 8/4 = quantize KV cache
 KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
-KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantiza a partir do token N
-PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # chunk do prefill (pico de RAM ↓)
+KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantize from token N onward
+PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # prefill chunk (peak RAM ↓)
 WIRED_LIMIT_GB = float(os.environ.get("MLX_WIRED_LIMIT_GB", "0"))  # 0 = auto (total-5GB)
-CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = default do MLX (sem cap)
-_DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = nunca expira
+CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = MLX default (no cap)
+_DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = never expires
 
 
 def _kv_kwargs():
-    """kwargs de KV-cache quantizado p/ o generate_step (vazio = KV em fp16, default)."""
+    """Quantized KV-cache kwargs for generate_step (empty = KV in fp16, default)."""
     if KV_BITS is None:
         return {}
     return {
@@ -105,12 +105,12 @@ def _kv_kwargs():
 
 
 def _tune_memory():
-    """Tuning de memória no boot: wired_limit mantém os pesos residentes (sem o SO
-    comprimir/paginar perto do limite de RAM -> velocidade consistente); cache_limit
-    (opcional) limita o pool de buffers do MLX, devolvendo RAM ao SO."""
+    """Memory tuning at boot: wired_limit keeps the weights resident (so the OS doesn't
+    compress/page near the RAM limit -> consistent speed); cache_limit (optional) caps the
+    MLX buffer pool, returning RAM to the OS."""
     try:
         total = (psutil.virtual_memory().total / 1024**3) if psutil else 24.0
-        wl = WIRED_LIMIT_GB or max(4.0, total - 5.0)  # auto: deixa ~5GB p/ o SO
+        wl = WIRED_LIMIT_GB or max(4.0, total - 5.0)  # auto: leaves ~5GB for the OS
         mx.set_wired_limit(int(wl * 1024**3))
         extra = ""
         if CACHE_LIMIT_GB > 0:
@@ -120,17 +120,17 @@ def _tune_memory():
             f"[router] mem: wired_limit={wl:.0f}GB prefill_step={PREFILL_STEP}{extra}", flush=True
         )
     except Exception as e:  # noqa: BLE001
-        print(f"[router] mem tuning falhou (segue sem): {e}", flush=True)
+        print(f"[router] mem tuning failed (continuing without): {e}", flush=True)
 
 
-# ---- estado dos modelos (mutado SÓ pelo worker; _reg_lock guarda a estrutura) ----
+# ---- model state (mutated ONLY by the worker; _reg_lock guards the structure) ----
 _reg_lock = threading.Lock()
 _chat = {}  # name -> {model, tok, size_gb, last, ka}
-_ac = {"model": None, "tok": None}  # autocomplete (fixo)
-_em = {"model": None, "proc": None}  # embed (fixo)
+_ac = {"model": None, "tok": None}  # autocomplete (fixed)
+_em = {"model": None, "proc": None}  # embed (fixed)
 
-# ---- fila de GPU (1 worker) ----
-P_SHORT, P_CHAT = 0, 1  # menor = maior prioridade
+# ---- GPU queue (1 worker) ----
+P_SHORT, P_CHAT = 0, 1  # lower = higher priority
 _q = queue.PriorityQueue(maxsize=MAX_QUEUE)
 _seq = itertools.count()
 
@@ -146,7 +146,7 @@ class Job:
 
 
 def _submit(prio, kind, payload):
-    """Enfileira um job de GPU. Retorna o Job, ou None se a fila estiver cheia."""
+    """Enqueues a GPU job. Returns the Job, or None if the queue is full."""
     job = Job(kind, payload)
     try:
         _q.put_nowait((prio, next(_seq), job))
@@ -159,14 +159,14 @@ def _gb(b):
     return round(b / 1024**3, 2)
 
 
-# ---------------------------------------------------------------- modelos (worker)
+# ---------------------------------------------------------------- models (worker)
 def _evict(name):
-    """Descarrega um modelo de chat (chamado só no worker)."""
+    """Unloads a chat model (called only on the worker)."""
     with _reg_lock:
         m = _chat.pop(name, None)
     if m is None:
         return
-    m["model"] = m["tok"] = m["pc"] = m["pctoks"] = None  # libera tb o KV cache do slot
+    m["model"] = m["tok"] = m["pc"] = m["pctoks"] = None  # also frees the slot's KV cache
     gc.collect()
     mx.clear_cache()
     print(f"[router] evict {name}", flush=True)
@@ -184,10 +184,10 @@ def _cache_bytes(pc):
 
 
 def _relieve_cache(keep):
-    """Sob pressão de RAM (free < MIN_FREE_CACHE_GB) descarta os KV caches dos runners —
-    do mais antigo (LRU) ao mais novo, `keep` por último. Bem mais barato que evictar o
-    modelo (o peso fica quente; só reprocessa o prompt no próximo turno). Roda no worker.
-    Usa o tamanho do cache (.nbytes) como recuperação prevista (o SO demora a refletir)."""
+    """Under RAM pressure (free < MIN_FREE_CACHE_GB) drops the runners' KV caches —
+    from oldest (LRU) to newest, `keep` last. Much cheaper than evicting the model
+    (the weights stay hot; it just reprocesses the prompt next turn). Runs on the worker.
+    Uses the cache size (.nbytes) as the expected recovery (the OS is slow to reflect it)."""
     free = _free_gb()
     if free is None or free >= MIN_FREE_CACHE_GB:
         return free
@@ -197,7 +197,7 @@ def _relieve_cache(keep):
             key=lambda n: _chat[n]["last"],
         )
         if keep in _chat and _chat[keep].get("pc") is not None:
-            order.append(keep)  # o do request atual só em último caso
+            order.append(keep)  # the current request's only as a last resort
     for n in order:
         with _reg_lock:
             e = _chat.get(n)
@@ -208,7 +208,7 @@ def _relieve_cache(keep):
         gc.collect()
         mx.clear_cache()
         print(
-            f"[router] RAM baixa (<{MIN_FREE_CACHE_GB:.1f}GB): descartou KV cache de "
+            f"[router] low RAM (<{MIN_FREE_CACHE_GB:.1f}GB): dropped KV cache of "
             f"{n} (~{freed:.2f}GB)",
             flush=True,
         )
@@ -219,16 +219,16 @@ def _relieve_cache(keep):
 
 
 def _enforce_memory(keep):
-    """Política de RAM: 1) sob pressão crítica (<MIN_FREE_CACHE_GB) larga KV caches (LRU,
-    barato); 2) se ainda faltar (<MIN_FREE_GB ou >MAX_RUNNERS) evicta modelo LRU (nunca
-    `keep`). Usa tamanho medido como recuperação prevista (o SO demora a refletir o free)."""
+    """RAM policy: 1) under critical pressure (<MIN_FREE_CACHE_GB) drop KV caches (LRU,
+    cheap); 2) if still short (<MIN_FREE_GB or >MAX_RUNNERS) evict the LRU model (never
+    `keep`). Uses measured size as expected recovery (the OS is slow to reflect free)."""
     _relieve_cache(keep)
     free = _free_gb()
     while True:
         with _reg_lock:
             n = len(_chat)
             if n <= 1:
-                return  # 1o modelo sempre fica (estilo Ollama)
+                return  # the 1st model always stays (Ollama-style)
             over = n > MAX_RUNNERS or (free is not None and free < MIN_FREE_GB)
             if not over:
                 return
@@ -239,13 +239,13 @@ def _enforce_memory(keep):
             vsize = _chat[victim]["size_gb"]
         _evict(victim)
         if free is not None:
-            free += vsize  # recuperação prevista
+            free += vsize  # expected recovery
 
 
 def chat_model(name):
-    """Garante o modelo de chat residente; carrega+mede tamanho+aplica budget.
-    Modelos com `vision: true` no config carregam via mlx_vlm (model, processor).
-    Retorna (model, tok_ou_processor, is_vlm)."""
+    """Ensures the chat model is resident; loads+measures size+applies the budget.
+    Models with `vision: true` in the config load via mlx_vlm (model, processor).
+    Returns (model, tok_or_processor, is_vlm)."""
     if name not in CFG:
         raise KeyError(name)
     with _reg_lock:
@@ -255,22 +255,22 @@ def chat_model(name):
             return m["model"], m["tok"], m["vlm"]
     vlm = bool(CFG[name].get("vision"))
     before = mx.get_active_memory()
-    print(f"[router] {'vlm' if vlm else 'chat'}: carregando {name} ...", flush=True)
+    print(f"[router] {'vlm' if vlm else 'chat'}: loading {name} ...", flush=True)
     if vlm:
         import mlx_vlm
 
         model, tok = mlx_vlm.load(CFG[name]["mlx"])
     else:
         model, tok = load(CFG[name]["mlx"])
-        # alguns tokenizers só listam <|endoftext|> em eos_token_ids; o terminador do
-        # chat template (ex.: <|im_end|>) fica de fora e vazaria como texto no fim.
+        # some tokenizers only list <|endoftext|> in eos_token_ids; the chat template's
+        # terminator (e.g. <|im_end|>) gets left out and would leak as text at the end.
         eid = getattr(tok, "eos_token_id", None)
         if eid is not None:
             try:
                 tok.eos_token_ids.add(eid)
             except (AttributeError, TypeError):
                 pass
-    mx.eval([v for _, v in tree_flatten(model.parameters())])  # materializa p/ medir
+    mx.eval([v for _, v in tree_flatten(model.parameters())])  # materialize to measure
     size = _gb(mx.get_active_memory() - before)
     with _reg_lock:
         _chat[name] = {
@@ -282,14 +282,14 @@ def chat_model(name):
             "vlm": vlm,
             "pc": None,
             "pctoks": None,
-        }  # slot de prompt cache (KV reuse)
+        }  # prompt cache slot (KV reuse)
     _enforce_memory(keep=name)
     return model, tok, vlm
 
 
 def ac_model():
     if _ac["model"] is None:
-        print("[router] autocomplete: carregando 1.5B FIM ...", flush=True)
+        print("[router] autocomplete: loading 1.5B FIM ...", flush=True)
         _ac["model"], _ac["tok"] = load(AC_REPO)
     return _ac["model"], _ac["tok"]
 
@@ -298,15 +298,15 @@ def em_model():
     if _em["model"] is None:
         import mlx_embeddings
 
-        print("[router] embed: carregando modernbert ...", flush=True)
+        print("[router] embed: loading modernbert ...", flush=True)
         _em["model"], _em["proc"] = mlx_embeddings.load(EM_REPO)
     return _em["model"], _em["proc"]
 
 
 def _normalize_messages(messages):
-    """Normaliza mensagens p/ o chat template. Em assistant com tool_calls, converte
-    function.arguments de string JSON -> objeto (a maioria dos templates espera dict)
-    e garante content presente; deixa role:'tool' (resultado) intacto."""
+    """Normalizes messages for the chat template. In assistant messages with tool_calls,
+    converts function.arguments from a JSON string -> object (most templates expect a dict)
+    and ensures content is present; leaves role:'tool' (result) intact."""
     out = []
     for m in messages:
         if m.get("role") == "assistant" and m.get("tool_calls"):
@@ -341,15 +341,15 @@ def _fmt_chat(tok, messages, tools=None):
     return "\n".join(m.get("content") or "" for m in messages)
 
 
-# ---------------------------------------------------------------- tools (Fase 2)
+# ---------------------------------------------------------------- tools (Phase 2)
 _TOOLCALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*</tool_call>", re.DOTALL)
 _FENCE_RE = re.compile(r"```(?:json|tool_call)?\s*(.*?)```", re.DOTALL)
 
 
 def _calls_from_obj(obj):
-    """obj (dict|list) -> lista de {name, arguments}. Vazio se não for tool-call.
-    Aceita formatos: {name, arguments}, {name, parameters},
-    {function:{name, arguments}}, {tool_calls:[...]}, e listas desses."""
+    """obj (dict|list) -> list of {name, arguments}. Empty if it's not a tool-call.
+    Accepts formats: {name, arguments}, {name, parameters},
+    {function:{name, arguments}}, {tool_calls:[...]}, and lists of those."""
     out = []
     if isinstance(obj, list):
         for o in obj:
@@ -375,9 +375,9 @@ def _calls_from_obj(obj):
 
 
 def _parse_tool_calls(text):
-    """Extrai tool-calls do texto gerado. Retorna (calls, content_restante).
-    1) blocos <tool_call>...</tool_call> (Qwen/Hermes/GLM);
-    2) fallback: bloco ```json``` ou texto cru que seja objeto/array JSON de call."""
+    """Extracts tool-calls from the generated text. Returns (calls, remaining_content).
+    1) <tool_call>...</tool_call> blocks (Qwen/Hermes/GLM);
+    2) fallback: a ```json``` block or raw text that is a JSON call object/array."""
     blocks = _TOOLCALL_RE.findall(text)
     if blocks:
         calls = []
@@ -388,7 +388,7 @@ def _parse_tool_calls(text):
                 pass
         if calls:
             return calls, _TOOLCALL_RE.sub("", text).strip()
-    if "<tool_call>" in text:  # abertura sem fechamento (prefill/truncado)
+    if "<tool_call>" in text:  # opening without a close (prefill/truncated)
         seg = text.split("<tool_call>", 1)[1]
         obj = _balanced_json(seg)
         if obj:
@@ -413,7 +413,7 @@ def _parse_tool_calls(text):
 
 
 def _openai_tool_calls(calls):
-    """Converte [{name, arguments}] -> formato OpenAI (arguments como string JSON)."""
+    """Converts [{name, arguments}] -> OpenAI format (arguments as a JSON string)."""
     return [
         {
             "id": "call_" + uuid.uuid4().hex[:24],
@@ -430,7 +430,7 @@ def _openai_tool_calls(calls):
 
 
 def _balanced_json(s):
-    """Extrai o 1o objeto JSON {...} balanceado de s (respeita strings/escapes)."""
+    """Extracts the 1st balanced JSON object {...} from s (respects strings/escapes)."""
     start = s.find("{")
     if start < 0:
         return None
@@ -454,16 +454,16 @@ def _balanced_json(s):
 
 
 def _tool_prefill(tool_choice, prompt):
-    """tool_choice forçado -> prefill (abertura de <tool_call>) p/ anexar ao prompt.
-    Só age em modelos Hermes-style (tag <tool_call> presente nas instruções do template):
-    'required' abre uma chamada qualquer; {function:{name}} fixa o nome. 'auto'/'none'/
-    vazio = sem prefill (o modelo decide)."""
+    """Forced tool_choice -> prefill (the opening of <tool_call>) to append to the prompt.
+    Only acts on Hermes-style models (the <tool_call> tag is present in the template's
+    instructions): 'required' opens any call; {function:{name}} pins the name. 'auto'/'none'/
+    empty = no prefill (the model decides)."""
     if not tool_choice or tool_choice in ("auto", "none"):
         return ""
-    if "<tool_call>" not in prompt:  # template não-Hermes: não dá p/ forçar via prefill
+    if "<tool_call>" not in prompt:  # non-Hermes template: can't force via prefill
         return ""
     if tool_choice == "required":
-        return '<tool_call>\n{"name": "'  # abre o objeto p/ evitar lixo antes do JSON
+        return '<tool_call>\n{"name": "'  # open the object to avoid junk before the JSON
     name = None
     if isinstance(tool_choice, dict):
         fn = tool_choice.get("function", tool_choice)
@@ -484,8 +484,8 @@ def _sampler(name, body):
 
 
 def _logits_processors(name, body):
-    """Penalidades de repetição (OpenAI + aliases Ollama). Request sobrepõe os params
-    do modelo. Retorna lista de processors p/ o generate_step, ou None se nada setado."""
+    """Repetition penalties (OpenAI + Ollama aliases). The request overrides the model's
+    params. Returns a list of processors for generate_step, or None if nothing is set."""
     p = CFG.get(name, {}).get("params", {})
 
     def g(*keys, default=None):
@@ -495,9 +495,9 @@ def _logits_processors(name, body):
                     return src[k]
         return default
 
-    rep = g("repetition_penalty", "repeat_penalty")  # multiplicativo (Ollama)
-    pres = g("presence_penalty")  # aditivo (OpenAI)
-    freq = g("frequency_penalty")  # aditivo proporcional (OpenAI)
+    rep = g("repetition_penalty", "repeat_penalty")  # multiplicative (Ollama)
+    pres = g("presence_penalty")  # additive (OpenAI)
+    freq = g("frequency_penalty")  # additive proportional (OpenAI)
     bias = g("logit_bias")
     ctx = int(g("repetition_context_size", "repeat_last_n", default=20))
     kw = {}
@@ -514,8 +514,8 @@ def _logits_processors(name, body):
 
 
 class _StopBuf:
-    """Detecção de stop sequences segura p/ streaming. Segura uma cauda (até maxlen-1
-    chars) antes de emitir, p/ não vazar um stop que cruza a fronteira entre tokens."""
+    """Streaming-safe stop-sequence detection. Holds back a tail (up to maxlen-1
+    chars) before emitting, so a stop that crosses a token boundary doesn't leak."""
 
     def __init__(self, stops):
         self.stops = [s for s in stops if s]
@@ -524,18 +524,18 @@ class _StopBuf:
         self.sent = 0
 
     def push(self, text):
-        """Adiciona texto novo. Retorna (texto_a_emitir, parou)."""
+        """Adds new text. Returns (text_to_emit, stopped)."""
         self.acc += text
         cut = -1
         for s in self.stops:
             j = self.acc.find(s)
             if j != -1 and (cut == -1 or j < cut):
                 cut = j
-        if cut != -1:  # stop encontrado: corta nele
+        if cut != -1:  # stop found: cut at it
             emit = self.acc[self.sent : cut] if cut > self.sent else ""
             self.sent = len(self.acc)
             return emit, True
-        safe = len(self.acc) - self.hold  # segura a cauda
+        safe = len(self.acc) - self.hold  # hold back the tail
         emit = self.acc[self.sent : safe] if safe > self.sent else ""
         self.sent += len(emit)
         return emit, False
@@ -547,9 +547,9 @@ class _StopBuf:
 
 
 def _response_format_processor(name, tok, body):
-    """response_format OpenAI -> logits processor de decodificação RESTRITA (llguidance,
-    via mlx_vlm.structured). `json_object` = qualquer objeto JSON; `json_schema` = conforme
-    o schema dado. Garante saída válida (mascara tokens inválidos a cada passo)."""
+    """OpenAI response_format -> CONSTRAINED-decoding logits processor (llguidance,
+    via mlx_vlm.structured). `json_object` = any JSON object; `json_schema` = conforming
+    to the given schema. Guarantees valid output (masks invalid tokens at each step)."""
     rf = body.get("response_format")
     if not isinstance(rf, dict):
         return None
@@ -560,19 +560,19 @@ def _response_format_processor(name, tok, body):
         js = rf.get("json_schema") or {}
         schema = js.get("schema") or js.get("json_schema") or {"type": "object"}
     else:
-        return None  # "text" ou desconhecido = sem restrição
+        return None  # "text" or unknown = no constraint
     try:
         from mlx_vlm.structured import build_json_schema_logits_processor
 
         hf_tok = getattr(tok, "_tokenizer", tok)
         return build_json_schema_logits_processor(hf_tok, schema)
     except Exception as e:  # noqa: BLE001
-        print(f"[router] response_format ignorado ({name}): {e}", flush=True)
+        print(f"[router] response_format ignored ({name}): {e}", flush=True)
         return None
 
 
 def gen_fim(body):
-    """Autocomplete FIM (Qwen2.5-Coder): <|fim_prefix|>pre<|fim_suffix|>suf<|fim_middle|>."""
+    """FIM autocomplete (Qwen2.5-Coder): <|fim_prefix|>pre<|fim_suffix|>suf<|fim_middle|>."""
     model, tok = ac_model()
     pre = body.get("prompt", "")
     suf = body.get("suffix", "") or ""
@@ -608,7 +608,7 @@ def embeddings(texts):
 
 # ---------------------------------------------------------------- keep_alive / mem
 def _parse_ka(v):
-    """keep_alive -> segundos. Aceita número ou string '30s'/'5m'/'1h'. None = default."""
+    """keep_alive -> seconds. Accepts a number or a string '30s'/'5m'/'1h'. None = default."""
     if v is None:
         return None
     if isinstance(v, (int, float)):
@@ -664,10 +664,10 @@ def _mem():
     return out
 
 
-# ---------------------------------------------------------------- multimodal (Fase 3)
+# ---------------------------------------------------------------- multimodal (Phase 3)
 def _extract_images(messages):
-    """Coleta as fontes de imagem das mensagens OpenAI multimodais (data URI ou URL);
-    o mlx-vlm carrega cada uma via load_image. Aceita type image_url/input_image/image."""
+    """Collects the image sources from OpenAI multimodal messages (data URI or URL);
+    mlx-vlm loads each one via load_image. Accepts type image_url/input_image/image."""
     imgs = []
     for m in messages:
         c = m.get("content")
@@ -686,8 +686,8 @@ def _extract_images(messages):
 
 
 def _gen_vlm(job, name, model, proc, body, messages, images):
-    """Geração multimodal via mlx-vlm. Streama deltas como o caminho de texto
-    (sem tools). skip_special_tokens evita vazar tokens do template na saída."""
+    """Multimodal generation via mlx-vlm. Streams deltas like the text path
+    (no tools). skip_special_tokens avoids leaking template tokens into the output."""
     import mlx_vlm
     from mlx_vlm.prompt_utils import apply_chat_template as vlm_template
 
@@ -729,9 +729,9 @@ def _common_prefix(a, b):
 
 
 def _reuse_cache(name, model, ptoks):
-    """Reuso de KV cache por maior-prefixo-comum (slot único por runner, estilo
-    Ollama/llama.cpp; zero deepcopy). Trima o sufixo divergente do cache do slot e
-    devolve (cache, tokens_a_processar). Sem match -> cache novo + prompt inteiro."""
+    """KV cache reuse by longest-common-prefix (single slot per runner, Ollama/llama.cpp
+    style; zero deepcopy). Trims the divergent suffix from the slot's cache and returns
+    (cache, tokens_to_process). No match -> new cache + the whole prompt."""
     if PROMPT_CACHE:
         with _reg_lock:
             e = _chat.get(name)
@@ -740,12 +740,12 @@ def _reuse_cache(name, model, ptoks):
         if slot_c is not None and slot_t and can_trim_prompt_cache(slot_c):
             n = _common_prefix(slot_t, ptoks)
             if n > 0:
-                extra = len(slot_t) - n  # tokens do slot além do prefixo
+                extra = len(slot_t) - n  # slot tokens beyond the prefix
                 if extra > 0:
                     trim_prompt_cache(slot_c, extra)
                 suffix = ptoks[n:]
-                if not suffix:  # prompt == prefixo do cache
-                    trim_prompt_cache(slot_c, 1)  # garante >=1 token p/ gerar
+                if not suffix:  # prompt == the cache's prefix
+                    trim_prompt_cache(slot_c, 1)  # ensure >=1 token to generate
                     suffix = ptoks[-1:]
                 return slot_c, suffix, n
     return make_prompt_cache(model), ptoks, 0
@@ -758,17 +758,17 @@ def _store_cache(name, all_toks, cache):
             _chat[name]["pctoks"] = all_toks
 
 
-# ---------------------------------------------------------------- worker de GPU
+# ---------------------------------------------------------------- GPU worker
 def _run_chat(job):
     name, body = job.payload["name"], job.payload["body"]
     messages = body.get("messages", [])
     images = _extract_images(messages)
-    if images and not CFG.get(name, {}).get("vision"):  # rejeita antes de carregar
+    if images and not CFG.get(name, {}).get("vision"):  # reject before loading
         job.out.put(
             (
                 "error",
-                f"modelo '{name}' nao e de visao (config vision:true); "
-                f"recebeu {len(images)} imagem(ns)",
+                f"model '{name}' is not a vision model (config vision:true); "
+                f"got {len(images)} image(s)",
             )
         )
         return
@@ -783,31 +783,31 @@ def _run_chat(job):
             if name in _chat:
                 _chat[name]["ka"] = ka
     job.out.put(("meta", name))
-    if vlm:  # Fase 3: caminho multimodal (mlx-vlm)
+    if vlm:  # Phase 3: multimodal path (mlx-vlm)
         _gen_vlm(job, name, model, tok, body, messages, images)
         return
     tc = body.get("tool_choice")
     tools = body.get("tools") if tc != "none" else None
     prompt = _fmt_chat(tok, messages, tools)
-    prefill = _tool_prefill(tc, prompt) if tools else ""  # tool_choice forçado
+    prefill = _tool_prefill(tc, prompt) if tools else ""  # forced tool_choice
     if prefill:
         prompt += prefill
-    ptoks = tok.encode(prompt, add_special_tokens=False)  # template já tem os specials
+    ptoks = tok.encode(prompt, add_special_tokens=False)  # template already has the specials
     cache, suffix, reused = _reuse_cache(name, model, ptoks)
     p = CFG.get(name, {}).get("params", {})
     seed = body.get("seed", p.get("seed"))
-    if seed is not None:  # reprodutibilidade (temp>0)
+    if seed is not None:  # reproducibility (temp>0)
         mx.random.seed(int(seed))
-    stops = body.get("stop", p.get("stop"))  # stop sequences (str ou lista)
+    stops = body.get("stop", p.get("stop"))  # stop sequences (str or list)
     if isinstance(stops, str):
         stops = [stops]
     stopbuf = _StopBuf(stops) if stops else None
-    lps = _logits_processors(name, body) or []  # penalidades de repetição
-    rf = _response_format_processor(name, tok, body)  # decod. restrita (JSON/schema)
+    lps = _logits_processors(name, body) or []  # repetition penalties
+    rf = _response_format_processor(name, tok, body)  # constrained decoding (JSON/schema)
     if rf is not None:
         lps = lps + [rf]
     last = None
-    buf = []  # com tools, bufferiza p/ parsear no fim
+    buf = []  # with tools, buffer to parse at the end
     gen_ids = []
     stopped = False
     try:
@@ -837,15 +837,15 @@ def _run_chat(job):
                     break
             else:
                 job.out.put(("delta", r.text))
-            _drain_short()  # deixa autocomplete/embed passar na frente
+            _drain_short()  # let autocomplete/embed cut in front
         if stopbuf is not None and not stopped:
-            tail = stopbuf.flush()  # esvazia a cauda segurada (fim natural)
+            tail = stopbuf.flush()  # drain the held-back tail (natural end)
             if tail:
                 job.out.put(("delta", tail))
-        _store_cache(name, ptoks + gen_ids, cache)  # slot reflete prompt+geração
+        _store_cache(name, ptoks + gen_ids, cache)  # slot reflects prompt+generation
         if reused:
             print(
-                f"[router] cache {name}: reusou {reused}/{len(ptoks)} tokens do prompt", flush=True
+                f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True
             )
         if tools:
             calls, content = _parse_tool_calls(prefill + "".join(buf))
@@ -854,7 +854,7 @@ def _run_chat(job):
             elif content:
                 job.out.put(("delta", content))
         job.out.put(("done", getattr(last, "generation_tokens", 0)))
-        _relieve_cache(name)  # resposta já enviada; alivia RAM se preciso
+        _relieve_cache(name)  # response already sent; relieve RAM if needed
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
     finally:
@@ -897,15 +897,15 @@ def _run_unload(job):
     gc.collect()
     mx.clear_cache()
     mx.reset_peak_memory()
-    print(f"[router] unload({target}) -> liberou {freed or 'nada'}", flush=True)
+    print(f"[router] unload({target}) -> freed {freed or 'nothing'}", flush=True)
     job.out.put(("result", freed))
 
 
 def _run_clear(job):
-    """Limpa contexto/cache SEM descarregar modelos (chamado só no worker).
-    'context' = dropa o prompt cache (KV da conversa) de todos os runners; o modelo fica
-    quente e a próxima chamada reprocessa o prompt. 'cache' = esvazia o pool de buffers do
-    MLX (mx.clear_cache) e zera o pico. 'all' = os dois."""
+    """Clears context/cache WITHOUT unloading models (called only on the worker).
+    'context' = drops the prompt cache (conversation KV) of all runners; the model stays
+    hot and the next call reprocesses the prompt. 'cache' = empties the MLX buffer pool
+    (mx.clear_cache) and resets the peak. 'all' = both."""
     target = job.payload["target"]
     cleared = []
     if target in ("context", "all"):
@@ -920,7 +920,7 @@ def _run_clear(job):
         mx.clear_cache()
         mx.reset_peak_memory()
         cleared.append("mlx-buffer-pool")
-    print(f"[ember] clear({target}) -> {cleared or 'nada'}", flush=True)
+    print(f"[ember] clear({target}) -> {cleared or 'nothing'}", flush=True)
     job.out.put(("result", cleared))
 
 
@@ -933,7 +933,7 @@ def _run_evict(job):
             if n in _chat and _chat[n]["ka"] >= 0 and now - _chat[n]["last"] > _chat[n]["ka"]
         ]
     for n in due:
-        print(f"[router] idle: {n} excedeu keep_alive", flush=True)
+        print(f"[router] idle: {n} exceeded keep_alive", flush=True)
         _evict(n)
     if due:
         mx.reset_peak_memory()
@@ -951,7 +951,7 @@ def _dispatch(job):
 
 
 def _drain_short():
-    """Executa jobs de prioridade alta (short) que chegaram durante a geração do chat."""
+    """Runs high-priority (short) jobs that arrived during chat generation."""
     while True:
         try:
             item = _q.get_nowait()
@@ -961,7 +961,7 @@ def _drain_short():
         if prio <= P_SHORT:
             _dispatch(job)
             _q.task_done()
-        else:  # é chat: devolve e para de drenar
+        else:  # it's a chat job: put it back and stop draining
             try:
                 _q.put_nowait(item)
             except queue.Full:
@@ -976,13 +976,13 @@ def _worker():
         try:
             _dispatch(item[2])
         except Exception as e:  # noqa: BLE001
-            print(f"[router] worker erro: {e}", flush=True)
+            print(f"[router] worker error: {e}", flush=True)
         finally:
             _q.task_done()
 
 
 def _watchdog():
-    """Enfileira eviction dos modelos ociosos (a remoção em si roda no worker)."""
+    """Enqueues eviction of idle models (the removal itself runs on the worker)."""
     while True:
         time.sleep(10)
         now = time.monotonic()
@@ -1062,10 +1062,10 @@ class Handler(BaseHTTPRequestHandler):
     def _chat(self, body):
         name = body.get("model", "")
         if name not in CFG:
-            return self._json(404, {"error": f"modelo '{name}' desconhecido"})
+            return self._json(404, {"error": f"unknown model '{name}'"})
         job = _submit(P_CHAT, "chat", {"name": name, "body": body})
         if job is None:
-            return self._json(503, {"error": "fila cheia (maxQueue)"})
+            return self._json(503, {"error": "queue full (maxQueue)"})
         cid, created = "chatcmpl-" + uuid.uuid4().hex[:20], int(time.time())
         if body.get("stream"):
             self._stream_out(job, cid, created, name)
@@ -1129,7 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except BrokenPipeError:
-            job.cancel.set()  # cliente caiu -> aborta geração
+            job.cancel.set()  # client dropped -> abort generation
 
     def _collect_out(self, job, cid, created, name):
         text = ""
@@ -1166,7 +1166,7 @@ class Handler(BaseHTTPRequestHandler):
     def _completions(self, body):
         job = _submit(P_SHORT, "fim", {"body": body})
         if job is None:
-            return self._json(503, {"error": "fila cheia (maxQueue)"})
+            return self._json(503, {"error": "queue full (maxQueue)"})
         kind, data = job.out.get()
         if kind == "error":
             return self._json(500, {"error": data})
@@ -1187,7 +1187,7 @@ class Handler(BaseHTTPRequestHandler):
         texts = inp if isinstance(inp, list) else [inp]
         job = _submit(P_SHORT, "embed", {"texts": texts})
         if job is None:
-            return self._json(503, {"error": "fila cheia (maxQueue)"})
+            return self._json(503, {"error": "queue full (maxQueue)"})
         kind, data = job.out.get()
         if kind == "error":
             return self._json(500, {"error": data})
@@ -1208,7 +1208,7 @@ class Handler(BaseHTTPRequestHandler):
         before = _mem()
         job = _submit(P_SHORT, "unload", {"target": target})
         if job is None:
-            return self._json(503, {"error": "fila cheia (maxQueue)"})
+            return self._json(503, {"error": "queue full (maxQueue)"})
         kind, data = job.out.get()
         freed = data if kind == "result" else []
         self._json(
@@ -1216,15 +1216,15 @@ class Handler(BaseHTTPRequestHandler):
             {"target": target, "unloaded": freed, "memory_before": before, "memory_after": _mem()},
         )
 
-    # ---- clear (contexto/cache, sem descarregar modelos) ----
+    # ---- clear (context/cache, without unloading models) ----
     def _clear(self, body):
         target = body.get("target", "all")
         if target not in ("context", "cache", "all"):
-            return self._json(400, {"error": "target deve ser context|cache|all"})
+            return self._json(400, {"error": "target must be context|cache|all"})
         before = _mem()
         job = _submit(P_SHORT, "clear", {"target": target})
         if job is None:
-            return self._json(503, {"error": "fila cheia (maxQueue)"})
+            return self._json(503, {"error": "queue full (maxQueue)"})
         kind, data = job.out.get()
         cleared = data if kind == "result" else []
         self._json(
@@ -1234,7 +1234,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host=None, port=None):
-    """Sobe o servidor HTTP e bloqueia (serve_forever)."""
+    """Starts the HTTP server and blocks (serve_forever)."""
     if port is None:
         port = int(os.environ.get("MLX_ROUTER_PORT", "8000"))
     if host is None:

@@ -1,4 +1,4 @@
-"""Ember — servidor de inferência MLX OpenAI-compatible p/ Apple Silicon."""
+"""Ember — OpenAI-compatible MLX inference server for Apple Silicon."""
 
 __version__ = "0.1.0"
 

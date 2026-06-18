@@ -1,4 +1,4 @@
-"""Permite `python -m ember` (mesma CLI do executável `ember`)."""
+"""Enables `python -m ember` (same CLI as the `ember` executable)."""
 
 from .cli import main
 

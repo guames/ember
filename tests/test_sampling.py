@@ -1,4 +1,4 @@
-"""Testes de stop sequences, keep_alive, prefixo de cache e payload multimodal."""
+"""Tests for stop sequences, keep_alive, cache prefix and multimodal payload."""
 
 from ember.server import _common_prefix, _extract_images, _normalize_messages, _parse_ka, _StopBuf
 
@@ -12,24 +12,24 @@ def test_stop_simple():
 
 
 def test_stop_split_across_tokens():
-    """Um stop que chega em vários tokens não pode vazar (hold-back)."""
+    """A stop that arrives across several tokens must not leak (hold-back)."""
     b = _StopBuf(["<|done|>"])
     out, hit = "", False
-    for tok in ["ola", "<|", "do", "ne", "|>", "resto"]:
+    for tok in ["hi", "<|", "do", "ne", "|>", "rest"]:
         e, h = b.push(tok)
         out += e
         if h:
             hit = True
             break
     assert hit
-    assert out == "ola"
+    assert out == "hi"
     assert "<|" not in out
 
 
 def test_stop_absent_flush_returns_tail():
     b = _StopBuf(["ZZZ"])
-    e, _ = b.push("texto normal")
-    assert e + b.flush() == "texto normal"
+    e, _ = b.push("normal text")
+    assert e + b.flush() == "normal text"
 
 
 def test_parse_ka():
@@ -51,13 +51,13 @@ def test_extract_images():
         {
             "role": "user",
             "content": [
-                {"type": "text", "text": "o que é isto?"},
+                {"type": "text", "text": "what is this?"},
                 {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
             ],
         }
     ]
     assert _extract_images(msgs) == ["data:image/png;base64,AAA"]
-    assert _extract_images([{"role": "user", "content": "só texto"}]) == []
+    assert _extract_images([{"role": "user", "content": "text only"}]) == []
 
 
 def test_normalize_messages_parses_tool_call_args():
