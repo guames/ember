@@ -27,6 +27,10 @@ First public release. Extracted and hardened from a private MLX benchmarking pro
   `memory`, `run`, `warm`, `unload`, `clear`, `config`, `version`.
 - `POST /clear` (and `ember clear`): drop prompt cache / MLX buffer pool without
   unloading models.
-- Benchmarks: [docs/benchmarks.md](docs/benchmarks.md) (Apple M5 24 GB — tok/s & RAM).
+- Benchmarks: [docs/benchmarks.md](docs/benchmarks.md) (Apple M5 24 GB — tok/s, MLX vs
+  Ollama RAM).
+- Beginner-friendly **Getting started** in the README and
+  [INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) — a guide you can hand to an AI assistant to
+  install and configure Ember interactively.
 
 [0.1.0]: https://github.com/gustavoames/ember/releases/tag/v0.1.0

@@ -41,13 +41,13 @@ backend…). Ember's niche is being the **unified, memory-adaptive** one for a s
 Measured on an **Apple M5, 24 GB** (MLX). Generation is memory-bandwidth bound, so MoE
 models fly while dense 30B-class models trade speed for quality:
 
-| Model | Quant | tok/s | RAM |
-|---|---|--:|--:|
-| DeepSeek-Coder-V2-16B (MoE) | 4-bit | **77** | 9 GB |
-| Qwen3-30B-A3B (MoE) | 3-bit | **68** | 13 GB |
-| Qwen3-8B | 3-bit | 36 | 4 GB |
-| Phi-4-14B | 3-bit | 19 | 6 GB |
-| Qwen2.5-Coder-32B | 3-bit | 8 | 15 GB |
+| Model | Quant | tok/s | RAM · MLX | RAM · Ollama |
+|---|---|--:|--:|--:|
+| DeepSeek-Coder-V2-16B (MoE) | 4-bit | **77** | **9 GB** | 11 GB |
+| Qwen3-30B-A3B (MoE) | 3-bit | **68** | **13 GB** | 15 GB |
+| Qwen3-8B | 3-bit | 36 | **4 GB** | 7 GB |
+| Phi-4-14B | 3-bit | 19 | **6 GB** | 10 GB |
+| Qwen2.5-Coder-32B | 3-bit | 8 | **15 GB** | 16 GB |
 
 Optimizations (measured): prompt cache cuts **TTFT ~5×** (396 → 80 ms on a 1.3k-token
 prompt); chunked prefill drops peak RAM ~19 %; 8-bit KV cache is ~2× smaller.
@@ -55,47 +55,76 @@ prompt); chunked prefill drops peak RAM ~19 %; 8-bit KV cache is ~2× smaller.
 ➡️ Full tables (all 18 configs, KV-cache memory per model, Ollama comparison) in
 [docs/benchmarks.md](docs/benchmarks.md).
 
-## Requirements
+## Getting started
 
-- macOS on **Apple Silicon** (M-series).
-- Python **3.10+**.
-- Enough RAM for the models you load (16 GB works; 24 GB+ recommended).
+> 🤖 **Want an AI assistant to set this up for you?** Hand it
+> [INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) — it walks the assistant through installing
+> and configuring Ember while *asking you* which models and options you want.
 
-## Install
+### 0. Requirements
+
+- A Mac with **Apple Silicon** (M1 or newer). Ember does not run on Intel Macs.
+- **Python 3.10+** — check with `python3 --version`. (Get it from [python.org](https://www.python.org/downloads/macos/) or `brew install python`.)
+- Free disk + RAM for the models you pick (8 GB works for small models; 24 GB+ for the
+  big ones — see [Benchmarks](#benchmarks)).
+
+### 1. Install
 
 ```bash
-pip install ember-mlx                 # core (chat, autocomplete, embeddings)
-pip install "ember-mlx[vision]"       # + vision (mlx-vlm) and response_format/JSON schema
+# recommended: an isolated environment
+python3 -m venv ~/.ember-venv
+source ~/.ember-venv/bin/activate
+
+pip install ember-mlx                # core: chat, autocomplete, embeddings
+# or, to also get vision + JSON-schema output:
+pip install "ember-mlx[vision]"
 ```
 
-Or from source:
+Check it worked:
 
 ```bash
-git clone https://github.com/gustavoames/ember && cd ember
-pip install -e ".[vision,dev]"
+ember --help
 ```
 
-## Quickstart
+### 2. Configure your models
 
-1. Create an `ember.yaml` (see [`examples/models.yaml`](examples/models.yaml)):
+Create a file named **`ember.yaml`** in the folder where you'll run Ember (start from
+[`examples/models.yaml`](examples/models.yaml)). Each entry has a `name` (what you'll call
+it in requests) and an `mlx` Hugging Face repo:
 
 ```yaml
 models:
-  - name: qwen3-8b
+  - name: qwen3-8b                       # small & fast — good first pick
     mlx: mlx-community/Qwen3-8B-4bit
-    params: { temperature: 0.0, top_p: 0.95, num_ctx: 32768 }
-  - name: qwen2.5-vl
+    params: { temperature: 0.0, num_ctx: 32768 }
+
+  - name: qwen2.5-vl                     # optional: vision (needs the [vision] extra)
     mlx: mlx-community/Qwen2.5-VL-3B-Instruct-4bit
     vision: true
 ```
 
-2. Run it (models download on first use):
+Not sure which models? See the [Benchmarks](#benchmarks) for speed/RAM, then validate your
+file with `ember config`. Models download automatically the first time they're used.
+
+### 3. Start the server
 
 ```bash
-ember                      # http://127.0.0.1:8000/v1
+ember serve                            # serves http://127.0.0.1:8000/v1
 ```
 
-3. Call it like the OpenAI API:
+Leave it running in this terminal (or set it to start at login — see
+[`examples/com.ember.server.plist`](examples/com.ember.server.plist)).
+
+### 4. Use it
+
+From another terminal — the friendly way:
+
+```bash
+ember run qwen3-8b "Write a haiku about Metal shaders."
+ember ps          # what's loaded right now
+```
+
+…or as a normal OpenAI API:
 
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
@@ -103,6 +132,8 @@ curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/jso
   "messages": [{"role": "user", "content": "Write a haiku about Metal shaders."}]
 }'
 ```
+
+That's it. To wire it into your editor, see [Use with Continue](#use-with-continue).
 
 ## Manage it from the terminal
 

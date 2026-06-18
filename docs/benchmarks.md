@@ -11,26 +11,29 @@ mileage varies with quant, context and thermals.
 
 ## Generation speed & memory (MLX)
 
-| Model | Quant | tok/s · MLX | RAM · MLX | tok/s · Ollama |
-|---|---|--:|--:|--:|
-| **DeepSeek-Coder-V2-16B** (MoE) | 4-bit | **77** | 9 GB | 68 |
-| DeepSeek-Coder-V2-16B | 6-bit | 53 | 13 GB | 52 |
-| DeepSeek-Coder-V2-16B | 8-bit | 43 | 17 GB | 38 |
-| **Qwen3-30B-A3B** (MoE) | 3-bit | **68** | 13 GB | 56 |
-| Qwen3-30B-A3B | 4-bit | 53 | 19 GB | 50 |
-| Qwen3-8B | 3-bit | 36 | 4 GB | 30 |
-| Qwen3-8B | 4-bit | 28 | 5 GB | 24 |
-| Qwen3-8B | 8-bit | 15 | 9 GB | 15 |
-| Qwen3-8B | 16-bit | 9 | 16 GB | 9 |
-| Phi-4-14B | 3-bit | 19 | 6 GB | 16 |
-| Phi-4-14B | 4-bit | 15 | 8 GB | 14 |
-| Phi-4-14B | 8-bit | 8 | 16 GB | 8 |
-| Codestral-22B | 3-bit | 12 | 9 GB | 11 |
-| Codestral-22B | 4-bit | 10 | 13 GB | 9 |
-| Gemma-3-27B | 3-bit | 9 | 13 GB | 8 |
-| GLM-4-32B | 3-bit | 9 | 14 GB | 8 |
-| GLM-4-32B | 4-bit | 7 | 18 GB | 6 |
-| Qwen2.5-Coder-32B | 3-bit | 8 | 15 GB | 8 |
+| Model | Quant | tok/s · MLX | RAM · MLX | tok/s · Ollama | RAM · Ollama |
+|---|---|--:|--:|--:|--:|
+| **DeepSeek-Coder-V2-16B** (MoE) | 4-bit | **77** | 9 GB | 68 | 11 GB |
+| DeepSeek-Coder-V2-16B | 6-bit | 53 | 13 GB | 52 | 16 GB |
+| DeepSeek-Coder-V2-16B | 8-bit | 43 | 17 GB | 38 | 17 GB |
+| **Qwen3-30B-A3B** (MoE) | 3-bit | **68** | 13 GB | 56 | 15 GB |
+| Qwen3-30B-A3B | 4-bit | 53 | 19 GB | 50 | 18 GB |
+| Qwen3-8B | 3-bit | 36 | 4 GB | 30 | 7 GB |
+| Qwen3-8B | 4-bit | 28 | 5 GB | 24 | 8 GB |
+| Qwen3-8B | 8-bit | 15 | 9 GB | 15 | 10 GB |
+| Qwen3-8B | 16-bit | 9 | 16 GB | 9 | 15 GB |
+| Phi-4-14B | 3-bit | 19 | 6 GB | 16 | 10 GB |
+| Phi-4-14B | 4-bit | 15 | 8 GB | 14 | 11 GB |
+| Phi-4-14B | 8-bit | 8 | 16 GB | 8 | 16 GB |
+| Codestral-22B | 3-bit | 12 | 9 GB | 11 | 12 GB |
+| Codestral-22B | 4-bit | 10 | 13 GB | 9 | 14 GB |
+| Gemma-3-27B | 3-bit | 9 | 13 GB | 8 | 14 GB |
+| GLM-4-32B | 3-bit | 9 | 14 GB | 8 | 16 GB |
+| GLM-4-32B | 4-bit | 7 | 18 GB | 6 | 19 GB |
+| Qwen2.5-Coder-32B | 3-bit | 8 | 15 GB | 8 | 16 GB |
+
+> MLX is consistently lighter on RAM than Ollama for the same model/quant (often 1–3 GB
+> less), and matches or beats its throughput on Apple Silicon.
 
 ## KV-cache memory (the "context" cost)
 
