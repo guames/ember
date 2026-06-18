@@ -264,9 +264,7 @@ def build_parser():
         help="context (conversation KV) | cache (MLX buffers) | all (default)",
     )
 
-    add(
-        "config", cmd_config, "Show the resolved config file and validate the models.", url=False
-    )
+    add("config", cmd_config, "Show the resolved config file and validate the models.", url=False)
     add("version", cmd_version, "Show the Ember version.", url=False)
     return p
 
