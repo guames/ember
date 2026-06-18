@@ -33,4 +33,4 @@ First public release. Extracted and hardened from a private MLX benchmarking pro
   [INSTALL_WITH_AI.md](INSTALL_WITH_AI.md) — a guide you can hand to an AI assistant to
   install and configure Ember interactively.
 
-[0.1.0]: https://github.com/gustavoames/ember/releases/tag/v0.1.0
+[0.1.0]: https://github.com/guames/ember/releases/tag/v0.1.0

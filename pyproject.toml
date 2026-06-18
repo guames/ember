@@ -32,9 +32,9 @@ vision = ["mlx-vlm>=0.1", "llguidance>=0.7"]
 dev = ["pytest>=7", "ruff>=0.5"]
 
 [project.urls]
-Homepage = "https://github.com/gustavoames/ember"
-Repository = "https://github.com/gustavoames/ember"
-Issues = "https://github.com/gustavoames/ember/issues"
+Homepage = "https://github.com/guames/ember"
+Repository = "https://github.com/guames/ember"
+Issues = "https://github.com/guames/ember/issues"
 
 [project.scripts]
 ember = "ember.cli:main"

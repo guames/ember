@@ -6,7 +6,7 @@ way are very welcome.
 ## Dev setup
 
 ```bash
-git clone https://github.com/gustavoames/ember && cd ember
+git clone https://github.com/guames/ember && cd ember
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[vision,dev]"
 ```
