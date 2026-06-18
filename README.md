@@ -12,9 +12,37 @@ Built for local coding assistants (e.g. [Continue](https://continue.dev)) on a s
 
 ---
 
-## Why Ember?
+## What is Ember?
 
-There are already OpenAI-compatible MLX servers (`mlx_lm.server`, FastMLX, LM Studio's
+**Ember is a local AI server for your Mac.** You point your tools (a coding assistant, a
+script, `curl`) at it as if it were the OpenAI API, and it runs the models **on your own
+machine** — private, offline, no subscription. It handles chat and code, code
+autocomplete, text embeddings, and image understanding, all from one address.
+
+**What it does.** A real coding setup needs several models at once — a big one to chat
+about code, a tiny fast one for inline autocomplete, an embedder for codebase search,
+maybe a vision model for screenshots. Running those as separate servers means three
+processes fighting over the same RAM. Ember runs them in **one** process with a single
+brain that decides what to keep loaded ("warm"), what to unload, and how to share memory —
+so things stay fast without ever overflowing your RAM.
+
+**Why it exists.** [Ollama](https://ollama.com) made local models genuinely pleasant:
+load by name, keep models warm, reuse the conversation cache, manage it from a simple CLI.
+But Ollama runs on llama.cpp/GGUF. On **Apple Silicon (the M-series chips)**, Apple's own
+[MLX](https://github.com/ml-explore/mlx) framework is typically **faster and lighter** for
+the same model. Ember takes the parts of Ollama that make it nice to use — the warm
+models, the prefix cache, the no-fuss CLI — and rebuilds them **natively on MLX, tuned for
+M-series Macs**: it consistently uses 1–3 GB less RAM per model and matches or beats
+Ollama's speed (see [Benchmarks](#benchmarks)). It is **not** a fork of Ollama — it shares
+none of its code; it borrows its *ergonomics* and reimplements them for Apple's stack,
+adding things a coding assistant wants out of the box (tools, vision, JSON-schema output,
+cooperative autocomplete).
+
+In short: **Ollama-style ease, MLX speed, built for the M-series.**
+
+## What makes it different
+
+Other OpenAI-compatible MLX servers exist (`mlx_lm.server`, FastMLX, LM Studio's
 backend…). Ember's niche is being the **unified, memory-adaptive** one for a single Mac:
 
 - 🧩 **One server, every role.** Chat/code, FIM autocomplete, embeddings and vision in a
