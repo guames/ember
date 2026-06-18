@@ -1,0 +1,31 @@
+# Ember model registry. Copy to `ember.yaml` in your working dir (or point
+# EMBER_CONFIG at it) and edit. Models download from Hugging Face on first use.
+#
+# Each chat model: name (used as the OpenAI "model" field), mlx (HF repo or local
+# path), optional vision: true (loads via mlx-vlm, accepts images), optional params.
+
+models:
+  # --- fast MoE, great default for code chat (Apple Silicon, ~15-18 GB) ---
+  - name: qwen3-30b-a3b
+    mlx: mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-DWQ
+    params: { temperature: 0.0, top_p: 0.95, top_k: 20, num_ctx: 8192 }
+
+  # --- small & quick ---
+  - name: qwen3-8b
+    mlx: mlx-community/Qwen3-8B-4bit
+    params: { temperature: 0.0, top_p: 0.95, num_ctx: 32768 }
+
+  # --- vision (needs the [vision] extra: pip install "ember-mlx[vision]") ---
+  - name: qwen2.5-vl
+    mlx: mlx-community/Qwen2.5-VL-3B-Instruct-4bit
+    vision: true
+    params: { temperature: 0.0, num_ctx: 16384 }
+
+# Fixed helper models (optional — these are the defaults if omitted).
+autocomplete:
+  name: autocomplete
+  mlx: mlx-community/Qwen2.5-Coder-1.5B-4bit       # FIM-capable base model
+
+embed:
+  name: embed
+  mlx: mlx-community/nomicai-modernbert-embed-base-4bit

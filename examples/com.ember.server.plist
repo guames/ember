@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- launchd agent: run Ember at login and keep it alive.
+     Edit the paths, then:
+       cp examples/com.ember.server.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.ember.server.plist
+     Logs go to /tmp/ember.log. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ember.server</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/ABSOLUTE/PATH/TO/.venv/bin/ember</string>
+  </array>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/TO/your/config/dir</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MLX_ROUTER_PORT</key><string>8000</string>
+    <key>MLX_IDLE_TIMEOUT</key><string>300</string>
+    <key>MLX_MAX_RUNNERS</key><string>4</string>
+    <key>MLX_MIN_FREE_GB</key><string>2.0</string>
+    <key>MLX_KV_BITS</key><string>8</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/ember.log</string>
+  <key>StandardErrorPath</key><string>/tmp/ember.log</string>
+</dict>
+</plist>

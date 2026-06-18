@@ -1,0 +1,38 @@
+# Continue (https://continue.dev) pointed at Ember as an OpenAI provider.
+# Put this in ~/.continue/config.yaml (model names must match your ember.yaml).
+name: Ember
+version: 1.0.0
+schema: v1
+models:
+  - name: Qwen3-30B-A3B (MLX)
+    provider: openai
+    model: qwen3-30b-a3b
+    apiBase: http://localhost:8000/v1
+    apiKey: sk-local
+    roles: [chat, edit, apply]
+    defaultCompletionOptions:
+      contextLength: 8192
+      maxTokens: 4096
+
+  - name: Qwen2.5-VL (vision, MLX)
+    provider: openai
+    model: qwen2.5-vl
+    apiBase: http://localhost:8000/v1
+    apiKey: sk-local
+    roles: [chat, edit, apply]
+    capabilities:
+      - image_input
+
+  - name: Autocomplete (MLX)
+    provider: openai
+    model: autocomplete
+    apiBase: http://localhost:8000/v1
+    apiKey: sk-local
+    roles: [autocomplete]
+
+  - name: Embed (MLX)
+    provider: openai
+    model: embed
+    apiBase: http://localhost:8000/v1
+    apiKey: sk-local
+    roles: [embed]

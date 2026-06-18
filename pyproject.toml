@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ember-mlx"
+version = "0.1.0"
+description = "Servidor de inferência MLX OpenAI-compatible para Apple Silicon: chat, tools, visão, embeddings e autocomplete em um processo, com memória adaptativa."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Gustavo Ames" }]
+keywords = ["mlx", "apple-silicon", "llm", "inference", "openai", "server", "continue", "local-ai"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: GPU",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Operating System :: MacOS",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+  "mlx-lm>=0.21",
+  "mlx-embeddings>=0.0.3",
+  "psutil>=5.9",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Visão (mlx-vlm) e saída estruturada/response_format (llguidance via mlx_vlm.structured).
+vision = ["mlx-vlm>=0.1", "llguidance>=0.7"]
+dev = ["pytest>=7", "ruff>=0.5"]
+
+[project.urls]
+Homepage = "https://github.com/gustavoames/ember"
+Repository = "https://github.com/gustavoames/ember"
+Issues = "https://github.com/gustavoames/ember/issues"
+
+[project.scripts]
+ember = "ember.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ember"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

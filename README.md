@@ -1,0 +1,133 @@
+# 🔥 Ember
+
+**A warm, memory-smart MLX inference server for Apple Silicon.**
+
+One process serves **chat, tool-calling, vision, embeddings and code autocomplete** —
+all on [MLX](https://github.com/ml-explore/mlx), all OpenAI-compatible, with a single
+adaptive memory policy that keeps your models *warm* and never blows past your RAM.
+
+Built for local coding assistants (e.g. [Continue](https://continue.dev)) on a single Mac.
+
+> ⚠️ Status: **beta**. Runs in daily use, but the API may still shift before 1.0.
+
+---
+
+## Why Ember?
+
+There are already OpenAI-compatible MLX servers (`mlx_lm.server`, FastMLX, LM Studio's
+backend…). Ember's niche is being the **unified, memory-adaptive** one for a single Mac:
+
+- 🧩 **One server, every role.** Chat/code, FIM autocomplete, embeddings and vision in a
+  single process — instead of juggling three servers and three memory budgets.
+- ⏱️ **Cooperative preemption.** Autocomplete and embedding requests *jump the queue and
+  run between the chat's tokens*, so typing never stalls a long generation.
+- 🧠 **Adaptive memory.** Multiple models stay hot while RAM allows (LRU eviction,
+  idle-unload, `keep_alive`). Under pressure it **drops KV caches oldest-first** before
+  evicting a whole model.
+- ⚡ **Prompt cache (prefix reuse).** Llama.cpp/Ollama-style longest-common-prefix KV reuse
+  → much lower TTFT when continuing a conversation. Zero-copy.
+- 🎯 **Real constrained decoding.** `response_format` with JSON schema is *guaranteed* via
+  [llguidance](https://github.com/guidance-ai/llguidance) (token-level masking), not prompt
+  nudging.
+- 🛠️ **Full OpenAI surface.** Tools/function-calling (`tool_choice` incl. forced),
+  streaming, `stop`, `seed`, repetition/presence/frequency penalties, `logit_bias`.
+- 💾 **Tuned for 24 GB.** 8-bit KV cache, chunked prefill (lower peak RAM), wired-memory
+  pinning for consistent speed near the limit.
+
+---
+
+## Requirements
+
+- macOS on **Apple Silicon** (M-series).
+- Python **3.10+**.
+- Enough RAM for the models you load (16 GB works; 24 GB+ recommended).
+
+## Install
+
+```bash
+pip install ember-mlx                 # core (chat, autocomplete, embeddings)
+pip install "ember-mlx[vision]"       # + vision (mlx-vlm) and response_format/JSON schema
+```
+
+Or from source:
+
+```bash
+git clone https://github.com/gustavoames/ember && cd ember
+pip install -e ".[vision,dev]"
+```
+
+## Quickstart
+
+1. Create an `ember.yaml` (see [`examples/models.yaml`](examples/models.yaml)):
+
+```yaml
+models:
+  - name: qwen3-8b
+    mlx: mlx-community/Qwen3-8B-4bit
+    params: { temperature: 0.0, top_p: 0.95, num_ctx: 32768 }
+  - name: qwen2.5-vl
+    mlx: mlx-community/Qwen2.5-VL-3B-Instruct-4bit
+    vision: true
+```
+
+2. Run it (models download on first use):
+
+```bash
+ember                      # http://127.0.0.1:8000/v1
+```
+
+3. Call it like the OpenAI API:
+
+```bash
+curl http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "qwen3-8b",
+  "messages": [{"role": "user", "content": "Write a haiku about Metal shaders."}]
+}'
+```
+
+## Endpoints
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/chat/completions` | chat/code — stream & non-stream; `tools`, `response_format`, images |
+| `POST /v1/completions` | FIM autocomplete (kept hot) |
+| `POST /v1/embeddings` | embeddings (kept hot) |
+| `GET /v1/models` | list configured models |
+| `GET /status` | hot models, memory, queue, policy |
+| `GET /memory` | MLX + system memory |
+| `POST /unload` | unload `chat` / `all` / `<model>` |
+
+## Configuration (env)
+
+| Var | Default | Meaning |
+|---|---|---|
+| `MLX_ROUTER_PORT` / `MLX_ROUTER_HOST` | `8000` / `127.0.0.1` | bind address |
+| `MLX_MAX_RUNNERS` | `4` | max models hot at once |
+| `MLX_MIN_FREE_GB` | `2.0` | evict a model below this free RAM |
+| `MLX_MIN_FREE_CACHE_GB` | `1.0` | drop KV caches below this free RAM |
+| `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model |
+| `MLX_MAX_QUEUE` | `32` | queue depth before returning 503 |
+| `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse |
+| `MLX_KV_BITS` | off | `8`/`4` to quantize the KV cache (~2× smaller at 8-bit) |
+| `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
+| `MLX_WIRED_LIMIT_GB` | auto | wired-memory ceiling (RAM−5 GB) |
+| `EMBER_CONFIG` | — | explicit path to the models config file |
+
+See [`docs/`](docs/) for tools, vision, `response_format`, prompt cache and memory details.
+
+## Use with Continue
+
+Point Continue at Ember as an OpenAI provider — see
+[`examples/continue.config.yaml`](examples/continue.config.yaml). Vision models get
+`capabilities: [image_input]`.
+
+## Roadmap
+
+- [ ] Prompt cache for vision models
+- [ ] Context shifting (generate past `num_ctx`)
+- [ ] Native `/api/*` compatibility layer
+- [ ] Optional batching for concurrent requests to the same model
+
+## License
+
+[MIT](LICENSE) © Gustavo Ames. Not affiliated with Apple or the MLX project.
