@@ -681,8 +681,12 @@ def embeddings(texts):
     import mlx_embeddings
 
     model, proc = em_model()
-    out = mlx_embeddings.generate(model, proc, texts)
-    return out.text_embeds.tolist()  # (n, 768)
+    # mlx_embeddings.generate pads to the longest text in the batch; pooling/normalization over
+    # the padded positions yields all-NaN embeddings for the shorter texts (and json.dumps then
+    # emits the bare literal `NaN`, invalid JSON for strict clients). Embedding one text at a
+    # time avoids the heterogeneous padding — single-text is always correct. Cost: N forward
+    # passes for a batch of N, acceptable on the serial embed path. See issue #5.
+    return [mlx_embeddings.generate(model, proc, [t]).text_embeds.tolist()[0] for t in texts]
 
 
 # ---------------------------------------------------------------- keep_alive / mem
