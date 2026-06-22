@@ -64,6 +64,7 @@ from mlx_lm import load, stream_generate
 from mlx_lm.models.cache import can_trim_prompt_cache, make_prompt_cache, trim_prompt_cache
 from mlx_lm.sample_utils import make_logits_processors, make_sampler
 
+from . import memory_policy
 from .registry import load_registry
 
 try:
@@ -212,35 +213,30 @@ def _dir_weight_gb(d):
 
 
 def _estimate_size_gb(name):
-    """Best estimate of a model's resident size (GB) BEFORE loading it: a real
-    measurement from a prior load this session, else its on-disk weight size, else
-    the largest hot model (or DEFAULT_EST_GB). Used for proactive admission control."""
-    if name in _sizes:
-        return _sizes[name]
+    """Best estimate of a model's resident size (GB) BEFORE loading it. Gathers the inputs
+    (prior measurement, on-disk weight size, hot-model sizes) and defers the choice to the
+    shared, pure `memory_policy.estimate_size_gb`."""
+    measured = _sizes.get(name)
     d = _weights_dir(CFG[name]["mlx"]) if name in CFG else None
-    est = _dir_weight_gb(d) if d else None
-    if est is not None:
-        return est
+    disk = _dir_weight_gb(d) if d else None
     with _reg_lock:
         hot = [m["size_gb"] for m in _chat.values()]
-    return max(hot) if hot else DEFAULT_EST_GB
+    return memory_policy.estimate_size_gb(measured, disk, hot, DEFAULT_EST_GB)
 
 
 def _make_room(name, est):
     """Proactively evict LRU chat models BEFORE loading `name`, so the incoming model
     fits the budget: free-after-load >= MIN_FREE_GB and runners <= MAX_RUNNERS. This is
     the admission gate — it runs before the (memory-spiking) load, so a second big model
-    can't overflow RAM during load and then get evicted too late. Runs on the worker."""
+    can't overflow RAM during load and then get evicted too late. Runs on the worker.
+
+    The eviction *decision* is the shared, pure `memory_policy.plan_make_room`; this wrapper
+    snapshots the hot models, then carries out the evictions (and logging)."""
     free = _free_gb()
-    while True:
-        with _reg_lock:
-            others = sorted((x for x in _chat if x != name), key=lambda x: _chat[x]["last"])
-            n_after = len(_chat) + (0 if name in _chat else 1)
-            short = free is not None and (free - est) < MIN_FREE_GB
-            if not others or (not short and n_after <= MAX_RUNNERS):
-                return
-            victim = others[0]
-            vsize = _chat[victim]["size_gb"]
+    with _reg_lock:
+        models = {n: {"last": m["last"], "size_gb": m["size_gb"]} for n, m in _chat.items()}
+    for victim in memory_policy.plan_make_room(name, est, free, models, MIN_FREE_GB, MAX_RUNNERS):
+        vsize = models[victim]["size_gb"]
         print(
             f"[router] admission: evicting LRU {victim} (~{vsize:.1f}GB) to fit "
             f"{name} (~{est:.1f}GB, free {free:.1f}GB)"
@@ -250,7 +246,7 @@ def _make_room(name, est):
         )
         _evict(victim)
         if free is not None:
-            free += vsize  # expected recovery
+            free += vsize  # expected recovery (keeps the log's free in step with the plan)
 
 
 def _cache_bytes(pc):
@@ -269,12 +265,10 @@ def _relieve_cache(keep):
     if free is None or free >= MIN_FREE_CACHE_GB:
         return free
     with _reg_lock:
-        order = sorted(
-            (n for n in _chat if n != keep and _chat[n].get("pc") is not None),
-            key=lambda n: _chat[n]["last"],
-        )
-        if keep in _chat and _chat[keep].get("pc") is not None:
-            order.append(keep)  # the current request's only as a last resort
+        snap = {
+            n: {"last": m["last"], "has_cache": m.get("pc") is not None} for n, m in _chat.items()
+        }
+    order = memory_policy.order_cache_relief(keep, snap)  # LRU first, `keep` last resort
     for n in order:
         with _reg_lock:
             e = _chat.get(n)
@@ -301,22 +295,10 @@ def _enforce_memory(keep):
     `keep`). Uses measured size as expected recovery (the OS is slow to reflect free)."""
     _relieve_cache(keep)
     free = _free_gb()
-    while True:
-        with _reg_lock:
-            n = len(_chat)
-            if n <= 1:
-                return  # the 1st model always stays (Ollama-style)
-            over = n > MAX_RUNNERS or (free is not None and free < MIN_FREE_GB)
-            if not over:
-                return
-            victims = sorted((x for x in _chat if x != keep), key=lambda x: _chat[x]["last"])
-            if not victims:
-                return
-            victim = victims[0]
-            vsize = _chat[victim]["size_gb"]
+    with _reg_lock:
+        models = {n: {"last": m["last"], "size_gb": m["size_gb"]} for n, m in _chat.items()}
+    for victim in memory_policy.plan_enforce(keep, free, models, MIN_FREE_GB, MAX_RUNNERS):
         _evict(victim)
-        if free is not None:
-            free += vsize  # expected recovery
 
 
 def chat_model(name):

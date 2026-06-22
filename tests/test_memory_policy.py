@@ -1,0 +1,104 @@
+"""Pure unit tests for the shared memory-policy planners.
+
+No server, no MLX, no monkeypatch — these call `memory_policy` directly with plain dicts,
+which is the whole point of extracting the decision logic from the effectful server.
+"""
+
+from ember import memory_policy as mp
+
+
+def _models(*rows):
+    """rows of (name, size_gb, last) -> snapshot dict the planners expect."""
+    return {name: {"last": last, "size_gb": size} for name, size, last in rows}
+
+
+# ---------------------------------------------------------------- estimate_size_gb
+def test_estimate_prefers_measured():
+    assert mp.estimate_size_gb(7.5, 9.0, [13.0], 8.0) == 7.5
+
+
+def test_estimate_falls_back_to_disk():
+    assert mp.estimate_size_gb(None, 9.0, [13.0], 8.0) == 9.0
+
+
+def test_estimate_falls_back_to_largest_hot():
+    assert mp.estimate_size_gb(None, None, [13.0, 3.0], 8.0) == 13.0
+
+
+def test_estimate_default_when_nothing_known():
+    assert mp.estimate_size_gb(None, None, [], 8.0) == 8.0
+
+
+# ---------------------------------------------------------------- plan_make_room
+def test_make_room_evicts_lru_before_a_big_model():
+    """Two ~12G models on 24G: loading the 2nd must evict the 1st before the load."""
+    models = _models(("old", 12.0, 1.0))
+    assert mp.plan_make_room("new", 12.0, 11.0, models, 2.0, 4) == ["old"]
+
+
+def test_make_room_keeps_models_that_fit():
+    models = _models(("small", 2.0, 1.0))
+    assert mp.plan_make_room("new", 4.0, 15.0, models, 2.0, 4) == []
+
+
+def test_make_room_enforces_max_runners():
+    """Even with plenty of RAM, the runner ceiling forces an eviction."""
+    models = _models(("a", 1.0, 1.0), ("b", 1.0, 2.0))
+    assert mp.plan_make_room("c", 1.0, 100.0, models, 2.0, 2) == ["a"]
+
+
+def test_make_room_evicts_in_lru_order_until_it_fits():
+    models = _models(("oldest", 8.0, 1.0), ("newer", 8.0, 5.0))
+    # need 12 + 2 = 14 free; have 3. evict oldest(+8=11) still short -> newer(+8=19) ok
+    assert mp.plan_make_room("new", 12.0, 3.0, models, 2.0, 4) == ["oldest", "newer"]
+
+
+def test_make_room_never_evicts_target():
+    """If the target is already resident (re-entry) it is never the victim."""
+    models = _models(("me", 12.0, 1.0))
+    assert mp.plan_make_room("me", 12.0, 0.5, models, 2.0, 4) == []
+
+
+def test_make_room_free_none_drives_only_by_runner_count():
+    """When free RAM can't be measured, only the runner ceiling can force evictions."""
+    models = _models(("a", 5.0, 1.0), ("b", 5.0, 2.0))
+    assert mp.plan_make_room("c", 5.0, None, models, 2.0, 4) == []  # 3 <= 4, no RAM signal
+    assert mp.plan_make_room("c", 5.0, None, models, 2.0, 2) == ["a"]  # 3 > 2 -> LRU
+
+
+# ---------------------------------------------------------------- plan_enforce
+def test_enforce_keeps_at_least_one():
+    models = _models(("only", 12.0, 1.0))
+    assert mp.plan_enforce("only", 0.1, models, 2.0, 4) == []
+
+
+def test_enforce_over_by_runner_count():
+    models = _models(("a", 1.0, 1.0), ("b", 1.0, 2.0), ("keep", 1.0, 3.0))
+    assert mp.plan_enforce("keep", 100.0, models, 2.0, 2) == ["a"]  # 3 > 2 -> drop LRU
+
+
+def test_enforce_over_by_ram_evicts_until_ok():
+    models = _models(("a", 3.0, 1.0), ("b", 3.0, 2.0), ("keep", 3.0, 3.0))
+    # free 1.0 < 2.0: evict a(+3=4) -> ok, b spared
+    assert mp.plan_enforce("keep", 1.0, models, 2.0, 4) == ["a"]
+
+
+def test_enforce_never_evicts_keep():
+    models = _models(("keep", 3.0, 1.0), ("other", 3.0, 2.0))
+    victims = mp.plan_enforce("keep", 0.0, models, 2.0, 4)
+    assert "keep" not in victims and victims == ["other"]
+
+
+# ---------------------------------------------------------------- order_cache_relief
+def _cache_models(*rows):
+    return {name: {"last": last, "has_cache": hc} for name, hc, last in rows}
+
+
+def test_cache_relief_lru_first_keep_last():
+    models = _cache_models(("a", True, 1.0), ("b", True, 5.0), ("keep", True, 3.0))
+    assert mp.order_cache_relief("keep", models) == ["a", "b", "keep"]
+
+
+def test_cache_relief_skips_models_without_cache():
+    models = _cache_models(("a", False, 1.0), ("b", True, 2.0), ("keep", False, 3.0))
+    assert mp.order_cache_relief("keep", models) == ["b"]
