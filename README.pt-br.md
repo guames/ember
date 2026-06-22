@@ -107,12 +107,16 @@ Ollama) em [docs/benchmarks.md](docs/benchmarks.md).
 
 ### 1. Instalação
 
+> ℹ️ **Ainda não está no PyPI.** O `pip install ember-mlx` não funciona até o pacote ser
+> publicado — por ora, instale a partir de um clone (`pip install .`). O release está pronto e
+> fiado; veja [Publicação](#publicação-mantenedor).
+
 ```bash
 # recomendado: um ambiente isolado
 python3 -m venv ~/.ember-venv
 source ~/.ember-venv/bin/activate
 
-pip install ember-mlx                # núcleo: chat, autocomplete, embeddings
+pip install ember-mlx                # núcleo: chat, autocomplete, embeddings (após publicar)
 # ou, para também ter visão + saída em JSON-schema:
 pip install "ember-mlx[vision]"
 ```
@@ -243,6 +247,21 @@ Aponte o Continue para o Ember como um provedor OpenAI — veja
 - [ ] Context shifting (gerar além do `num_ctx`)
 - [ ] Camada de compatibilidade `/api/*` nativa
 - [ ] Batching opcional para requisições concorrentes ao mesmo modelo
+
+## Publicação (mantenedor)
+
+> 📦 **Status: ainda não está no PyPI — pendente, por opção.** O caminho de release está todo
+> fiado ([`.github/workflows/release.yml`](.github/workflows/release.yml), build + publish via
+> GitHub Actions **Trusted Publishing** / OIDC — sem tokens de API). Só faltam os passos abaixo;
+> faça-os quando de fato quiser o `ember-mlx` no PyPI.
+
+1. **Uma vez, em [pypi.org](https://pypi.org/manage/account/publishing/)** → *Add a pending publisher*:
+   - PyPI Project Name: `ember-mlx`
+   - Owner: `guames` · Repository: `ember`
+   - Workflow name: `release.yml` · Environment: `pypi`
+2. **Crie a tag de release:** `git tag v0.1.0 && git push origin v0.1.0`
+3. O workflow de Release builda o sdist + wheel e publica via OIDC. Valide com
+   `pip install ember-mlx` num venv limpo. (Os badges de PyPI acima passam a funcionar aqui.)
 
 ## Licença
 
