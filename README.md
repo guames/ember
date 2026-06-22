@@ -1,5 +1,12 @@
 # 🔥 Ember
 
+[![CI](https://github.com/guames/ember/actions/workflows/ci.yml/badge.svg)](https://github.com/guames/ember/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/ember-mlx.svg)](https://pypi.org/project/ember-mlx/)
+[![Python](https://img.shields.io/pypi/pyversions/ember-mlx.svg)](https://pypi.org/project/ember-mlx/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+🇬🇧 **English** · [🇧🇷 Português](README.pt-br.md)
+
 **A warm, memory-smart MLX inference server for Apple Silicon.**
 
 One process serves **chat, tool-calling, vision, embeddings and code autocomplete** —
