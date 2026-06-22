@@ -233,7 +233,10 @@ Os comandos de gerência falam com um servidor em execução (`--url`, padrão
 | `MLX_WIRED_LIMIT_GB` | auto | teto de memória wired (RAM−5 GB) |
 | `EMBER_CONFIG` | — | caminho explícito para o arquivo de config dos modelos |
 
-Veja [`docs/`](docs/) para detalhes de tools, visão, `response_format`, prompt cache e memória.
+**Guias por feature** ([`docs/`](docs/README.md)): [Tools & function-calling](docs/tools.md) ·
+[Visão](docs/vision.md) · [Saída estruturada](docs/response-format.md) ·
+[Prompt cache](docs/prompt-cache.md) · [Memória adaptativa](docs/memory.md) ·
+[Benchmarks](docs/benchmarks.md). _(Os guias estão em inglês.)_
 
 ## Usar com o Continue
 
@@ -243,10 +246,19 @@ Aponte o Continue para o Ember como um provedor OpenAI — veja
 
 ## Roadmap
 
-- [ ] Prompt cache para modelos de visão
-- [ ] Context shifting (gerar além do `num_ctx`)
-- [ ] Camada de compatibilidade `/api/*` nativa
-- [ ] Batching opcional para requisições concorrentes ao mesmo modelo
+Trabalho planejado, em ordem aproximada de prioridade — **nada disso está implementado
+ainda**. Contribuições são bem-vindas.
+
+- [ ] **Prompt cache para modelos de visão.** O chat de texto já reusa o prefixo KV
+  ([prompt cache](docs/prompt-cache.md)); modelos de visão reprocessam o prompt a cada turno.
+- [ ] **Context shifting.** Gerar além do `num_ctx` do modelo descartando os tokens mais
+  antigos, em vez de parar no limite.
+- [ ] **Camada de compatibilidade `/api/*` nativa.** Hoje o Ember fala a superfície da
+  OpenAI (`/v1/*`); um `/api/*` no estilo Ollama deixaria mais ferramentas apontarem para
+  ele sem mudança.
+- [ ] **Batching opcional.** O worker de GPU é serial hoje (com preempção cooperativa —
+  veja [memória adaptativa](docs/memory.md)); fazer batching de requisições concorrentes
+  ao mesmo modelo aumentaria a vazão.
 
 ## Publicação (mantenedor)
 

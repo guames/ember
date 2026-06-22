@@ -229,7 +229,10 @@ Management commands talk to a running server (`--url`, default `http://127.0.0.1
 | `MLX_WIRED_LIMIT_GB` | auto | wired-memory ceiling (RAM−5 GB) |
 | `EMBER_CONFIG` | — | explicit path to the models config file |
 
-See [`docs/`](docs/) for tools, vision, `response_format`, prompt cache and memory details.
+**Feature guides** ([`docs/`](docs/README.md)): [Tools & function-calling](docs/tools.md) ·
+[Vision](docs/vision.md) · [Structured output](docs/response-format.md) ·
+[Prompt cache](docs/prompt-cache.md) · [Adaptive memory](docs/memory.md) ·
+[Benchmarks](docs/benchmarks.md).
 
 ## Use with Continue
 
@@ -239,10 +242,18 @@ Point Continue at Ember as an OpenAI provider — see
 
 ## Roadmap
 
-- [ ] Prompt cache for vision models
-- [ ] Context shifting (generate past `num_ctx`)
-- [ ] Native `/api/*` compatibility layer
-- [ ] Optional batching for concurrent requests to the same model
+Planned work, roughly in priority order — none of these is implemented yet.
+Contributions welcome.
+
+- [ ] **Prompt cache for vision models.** Text chat already reuses the KV prefix
+  ([prompt cache](docs/prompt-cache.md)); vision models reprocess their prompt each turn.
+- [ ] **Context shifting.** Generate past a model's `num_ctx` by dropping the oldest
+  tokens instead of stopping at the limit.
+- [ ] **Native `/api/*` compatibility layer.** Ember speaks the OpenAI surface (`/v1/*`)
+  today; an Ollama-style `/api/*` would let more tools point at it unchanged.
+- [ ] **Optional batching.** The GPU worker is serial today (with cooperative
+  preemption — see [adaptive memory](docs/memory.md)); batching concurrent requests to
+  the same model would raise throughput.
 
 ## Publishing (maintainer)
 
