@@ -17,28 +17,37 @@ def _fake_out(vec):
     return types.SimpleNamespace(text_embeds=types.SimpleNamespace(tolist=lambda: [vec]))
 
 
+class _FakeProc:
+    """Fake tokenizer: one token per character, so expected counts are easy to assert."""
+
+    def encode(self, text, truncation=True, max_length=512):
+        return list(text)[:max_length]
+
+
 def test_embeddings_one_text_per_call(monkeypatch):
     """Each text must be embedded on its own — never batched (that is what NaNs the short ones)."""
-    monkeypatch.setattr(server, "em_model", lambda: ("M", "P"))
+    proc = _FakeProc()
+    monkeypatch.setattr(server, "em_model", lambda: ("M", proc))
     calls = []
 
-    def fake_generate(model, proc, texts):
-        assert (model, proc) == ("M", "P")
+    def fake_generate(model, p, texts):
+        assert (model, p) == ("M", proc)
         assert len(texts) == 1  # the invariant: never a mixed-length batch
         calls.append(texts[0])
         return _fake_out([float(len(texts[0]))] * 3)
 
     monkeypatch.setattr(mlx_embeddings, "generate", fake_generate)
 
-    out = server.embeddings(["aa", "bbbb", "c"])
+    vecs, prompt_tokens = server.embeddings(["aa", "bbbb", "c"])
 
     assert calls == ["aa", "bbbb", "c"]  # order preserved
-    assert out == [[2.0, 2.0, 2.0], [4.0, 4.0, 4.0], [1.0, 1.0, 1.0]]
+    assert vecs == [[2.0, 2.0, 2.0], [4.0, 4.0, 4.0], [1.0, 1.0, 1.0]]
+    assert prompt_tokens == 2 + 4 + 1  # sum of per-text token counts
 
 
 def test_embeddings_empty_input(monkeypatch):
-    monkeypatch.setattr(server, "em_model", lambda: ("M", "P"))
+    monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
     monkeypatch.setattr(
         mlx_embeddings, "generate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called"))
     )
-    assert server.embeddings([]) == []
+    assert server.embeddings([]) == ([], 0)

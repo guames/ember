@@ -669,7 +669,12 @@ def gen_fim(body):
     for s in stops:
         if s:
             text = text.split(s)[0]
-    return text
+    usage = {
+        "prompt_tokens": len(ptoks),
+        "completion_tokens": len(gen_ids),
+        "cached_tokens": reused,
+    }
+    return text, usage
 
 
 def embeddings(texts):
@@ -681,7 +686,9 @@ def embeddings(texts):
     # emits the bare literal `NaN`, invalid JSON for strict clients). Embedding one text at a
     # time avoids the heterogeneous padding — single-text is always correct. Cost: N forward
     # passes for a batch of N, acceptable on the serial embed path. See issue #5.
-    return [mlx_embeddings.generate(model, proc, [t]).text_embeds.tolist()[0] for t in texts]
+    vecs = [mlx_embeddings.generate(model, proc, [t]).text_embeds.tolist()[0] for t in texts]
+    prompt_tokens = sum(len(proc.encode(t, truncation=True, max_length=512)) for t in texts)
+    return vecs, prompt_tokens
 
 
 # ---------------------------------------------------------------- keep_alive / mem
@@ -789,7 +796,16 @@ def _gen_vlm(job, name, model, proc, body, messages, images):
             job.out.put(("delta", r.text))
             last = r
             _drain_short()
-        job.out.put(("done", getattr(last, "generation_tokens", 0)))
+        job.out.put(
+            (
+                "done",
+                {
+                    "prompt_tokens": getattr(last, "prompt_tokens", 0),
+                    "completion_tokens": getattr(last, "generation_tokens", 0),
+                    "cached_tokens": getattr(last, "cached_tokens", 0),
+                },
+            )
+        )
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
     finally:
@@ -957,7 +973,16 @@ def _run_chat(job):
                 job.out.put(("toolcalls", (calls, content)))
             elif content:
                 job.out.put(("delta", content))
-        job.out.put(("done", getattr(last, "generation_tokens", 0)))
+        job.out.put(
+            (
+                "done",
+                {
+                    "prompt_tokens": len(ptoks),
+                    "completion_tokens": getattr(last, "generation_tokens", 0),
+                    "cached_tokens": reused,
+                },
+            )
+        )
         _relieve_cache(name)  # response already sent; relieve RAM if needed
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
@@ -1102,6 +1127,17 @@ def _watchdog():
             _submit(P_SHORT, "evict", {"names": expired})
 
 
+def _usage_obj(u):
+    """{prompt_tokens, completion_tokens, cached_tokens} -> OpenAI-shaped usage object."""
+    p, c = u["prompt_tokens"], u["completion_tokens"]
+    return {
+        "prompt_tokens": p,
+        "completion_tokens": c,
+        "total_tokens": p + c,
+        "prompt_tokens_details": {"cached_tokens": u["cached_tokens"]},
+    }
+
+
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -1177,12 +1213,13 @@ class Handler(BaseHTTPRequestHandler):
         if job is None:
             return self._json(503, {"error": "queue full (maxQueue)"})
         cid, created = "chatcmpl-" + uuid.uuid4().hex[:20], int(time.time())
+        include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         if body.get("stream"):
-            self._stream_out(job, cid, created, name)
+            self._stream_out(job, cid, created, name, include_usage)
         else:
             self._collect_out(job, cid, created, name)
 
-    def _stream_out(self, job, cid, created, name):
+    def _stream_out(self, job, cid, created, name, include_usage):
         first, data = job.out.get()
         if first == "error":
             return self._json(500, {"error": data})
@@ -1226,6 +1263,8 @@ class Handler(BaseHTTPRequestHandler):
                     finish = "tool_calls"
                 elif kind == "done":
                     send({**base, "choices": [{"index": 0, "delta": {}, "finish_reason": finish}]})
+                    if include_usage:
+                        send({**base, "choices": [], "usage": _usage_obj(data)})
                     break
                 elif kind == "error":
                     send(
@@ -1266,7 +1305,7 @@ class Handler(BaseHTTPRequestHandler):
                         "created": created,
                         "model": name,
                         "choices": [{"index": 0, "finish_reason": finish, "message": msg}],
-                        "usage": {"completion_tokens": data},
+                        "usage": _usage_obj(data),
                     },
                 )
             elif kind == "error":
@@ -1280,6 +1319,7 @@ class Handler(BaseHTTPRequestHandler):
         kind, data = job.out.get()
         if kind == "error":
             return self._json(500, {"error": data})
+        text, usage = data
         self._json(
             200,
             {
@@ -1287,7 +1327,8 @@ class Handler(BaseHTTPRequestHandler):
                 "object": "text_completion",
                 "created": int(time.time()),
                 "model": body.get("model", AC_NAME),
-                "choices": [{"index": 0, "text": data, "finish_reason": "stop"}],
+                "choices": [{"index": 0, "text": text, "finish_reason": "stop"}],
+                "usage": _usage_obj(usage),
             },
         )
 
@@ -1301,14 +1342,16 @@ class Handler(BaseHTTPRequestHandler):
         kind, data = job.out.get()
         if kind == "error":
             return self._json(500, {"error": data})
+        vecs, prompt_tokens = data
         self._json(
             200,
             {
                 "object": "list",
                 "model": body.get("model", EM_NAME),
                 "data": [
-                    {"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(data)
+                    {"object": "embedding", "index": i, "embedding": v} for i, v in enumerate(vecs)
                 ],
+                "usage": {"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
             },
         )
 

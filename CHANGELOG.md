@@ -25,6 +25,9 @@ Not yet published to PyPI — see [Publishing](README.md#publishing-maintainer).
   ([`.github/workflows/release.yml`](.github/workflows/release.yml)) (#11, #12).
 - Feature guides under [`docs/`](docs/README.md): tools, vision, structured output,
   prompt cache, and adaptive memory (#15).
+- OpenAI-shaped `usage` (`prompt_tokens`/`completion_tokens`/`total_tokens` +
+  `prompt_tokens_details.cached_tokens`) on chat, FIM, and embeddings responses; chat
+  streaming exposes it via `stream_options: {"include_usage": true}` (#18).
 
 ## [0.1.0] — 2026-06-17
 
