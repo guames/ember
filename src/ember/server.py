@@ -135,6 +135,8 @@ CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = MLX def
 _DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = never expires
 API_KEY = os.environ.get("EMBER_API_KEY") or None  # unset = no auth (default, localhost-only)
 SHUTDOWN_TIMEOUT = float(os.environ.get("EMBER_SHUTDOWN_TIMEOUT", "30"))  # s to drain on SIGTERM
+MAX_BODY_MB = float(os.environ.get("EMBER_MAX_BODY_MB", "32"))  # request body cap
+MAX_BODY_BYTES = int(MAX_BODY_MB * 1024 * 1024)
 METRICS_LOG_PATH = os.environ.get(
     "EMBER_METRICS_LOG", os.path.expanduser("~/.cache/ember/metrics.jsonl")
 )
@@ -1593,7 +1595,16 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/v1") and not self._authorized():
             return self._reject_unauthorized()
         length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length) or b"{}")
+        if length > MAX_BODY_BYTES:
+            return self._error(
+                413,
+                f"request body exceeds the {MAX_BODY_MB:g}MB limit",
+                err_code="request_too_large",
+            )
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self._error(400, "invalid JSON in request body", err_code="invalid_json")
         try:
             if path.endswith("/chat/completions"):
                 self._chat(body)
