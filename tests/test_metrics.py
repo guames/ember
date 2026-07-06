@@ -148,9 +148,11 @@ def test_metrics_endpoint_returns_prometheus_text(live_server, clean_metrics):
         conn.close()
 
 
-def test_metrics_endpoint_unauthenticated_even_with_api_key(
+def test_metrics_endpoint_requires_bearer_token_when_api_key_set(
     live_server, clean_metrics, monkeypatch
 ):
+    """/metrics leaks model names/traffic counters, so it's guarded like /v1/* once an
+    API key is set (issue #52)."""
     monkeypatch.setattr(server, "API_KEY", "secret123")
     host, port = live_server.server_address
     conn = http.client.HTTPConnection(host, port, timeout=5)
@@ -158,7 +160,12 @@ def test_metrics_endpoint_unauthenticated_even_with_api_key(
         conn.request("GET", "/metrics")
         r = conn.getresponse()
         r.read()
-        assert r.status == 200  # /metrics is not under /v1, so no bearer token required
+        assert r.status == 401
+
+        conn.request("GET", "/metrics", headers={"Authorization": "Bearer secret123"})
+        r = conn.getresponse()
+        r.read()
+        assert r.status == 200
     finally:
         conn.close()
 

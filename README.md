@@ -216,10 +216,11 @@ Management commands talk to a running server (`--url`, default `http://127.0.0.1
 | `GET /memory` | MLX + system memory |
 | `GET /metrics` | request counters + latency histogram, Prometheus text format |
 | `POST /unload` | unload `chat` / `all` / `<model>` |
+| `POST /clear` | drop prompt-cache / MLX buffer pool `context` / `cache` / `all` |
 
-`/v1/*` routes require `Authorization: Bearer <key>` when `EMBER_API_KEY` is set (off by
-default). `SIGTERM` stops accepting new requests, waits for the in-flight job to finish
-(up to `EMBER_SHUTDOWN_TIMEOUT`), then exits.
+Every route except `GET /health` requires `Authorization: Bearer <key>` when `EMBER_API_KEY`
+is set (off by default). `SIGTERM` stops accepting new requests, waits for the in-flight job
+to finish (up to `EMBER_SHUTDOWN_TIMEOUT`), then exits.
 
 Every chat/FIM/embed request also appends a JSON line (endpoint, model, latency,
 prompt/completion/cached tokens, status) to `EMBER_METRICS_LOG` — additive to the existing
@@ -232,7 +233,7 @@ and a latency histogram, reset on restart.
 | Var | Default | Meaning |
 |---|---|---|
 | `MLX_ROUTER_PORT` / `MLX_ROUTER_HOST` | `8000` / `127.0.0.1` | bind address |
-| `EMBER_API_KEY` | off | require `Authorization: Bearer <key>` on `/v1/*` |
+| `EMBER_API_KEY` | off | require `Authorization: Bearer <key>` on every route except `/health` |
 | `EMBER_SHUTDOWN_TIMEOUT` | `30` | seconds to drain the in-flight job on `SIGTERM` |
 | `EMBER_METRICS_LOG` | `~/.cache/ember/metrics.jsonl` | JSONL request log path (`0` disables it) |
 | `MLX_MAX_RUNNERS` | auto by RAM (`4` on 24GB) | max models hot at once |
