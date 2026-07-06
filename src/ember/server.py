@@ -45,18 +45,20 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MIN_FREE_CACHE_GB(1.0) MLX_DEFAULT_EST_GB(auto by RAM, 8.0 on 24GB)
       MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(8) MLX_KV_GROUP_SIZE(64)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
-      MLX_CACHE_LIMIT_GB(off)
+      MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
 
     ember                          # CLI (port 8000 or env MLX_ROUTER_PORT)
     python -m ember
 """
 
 import gc
+import hashlib
 import itertools
 import json
 import os
 import queue
 import re
+import sqlite3
 import threading
 import time
 import uuid
@@ -92,6 +94,10 @@ MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # flo
 DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default_est_gb"])))  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 EMBED_CHUNK = int(os.environ.get("MLX_EMBED_CHUNK", "8"))  # texts per embed slice
+EMBED_CACHE = os.environ.get("MLX_EMBED_CACHE", "1") not in ("0", "false", "")  # content-hash cache
+EMBED_CACHE_PATH = os.environ.get(
+    "MLX_EMBED_CACHE_PATH", os.path.expanduser("~/.cache/ember/embeddings.sqlite3")
+)
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
 PROMPT_CACHE_SLOTS = max(1, int(os.environ.get("MLX_PROMPT_CACHE_SLOTS", "2")))  # KV slots/runner
 _KVB = os.environ.get("MLX_KV_BITS", "8")  # 8/4 = quantize KV cache; 0 = fp16
@@ -708,17 +714,85 @@ def gen_fim(body):
     return text, usage
 
 
+class _EmbedCache:
+    """On-disk content-hash -> embedding cache (sqlite3, stdlib only). Repeated indexing runs
+    (e.g. `ledger recall`) skip the forward pass entirely for text already embedded."""
+
+    def __init__(self, path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vec TEXT)"
+        )
+        self._conn.commit()
+        self._lock = threading.Lock()
+
+    def get(self, h):
+        with self._lock:
+            row = self._conn.execute("SELECT vec FROM embeddings WHERE hash = ?", (h,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def put(self, h, vec):
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO embeddings (hash, vec) VALUES (?, ?)", (h, json.dumps(vec))
+            )
+            self._conn.commit()
+
+
+_embed_cache_singleton = None
+
+
+def _embed_cache():
+    global _embed_cache_singleton
+    if _embed_cache_singleton is None:
+        _embed_cache_singleton = _EmbedCache(EMBED_CACHE_PATH)
+    return _embed_cache_singleton
+
+
+def _embed_hash(text):
+    return hashlib.sha256(f"{EM_REPO}\0{text}".encode()).hexdigest()
+
+
 def embeddings(texts):
     import mlx_embeddings
 
     model, proc = em_model()
-    # mlx_embeddings.generate pads to the longest text in the batch; pooling/normalization over
-    # the padded positions yields all-NaN embeddings for the shorter texts (and json.dumps then
-    # emits the bare literal `NaN`, invalid JSON for strict clients). Embedding one text at a
-    # time avoids the heterogeneous padding — single-text is always correct. Cost: N forward
-    # passes for a batch of N, acceptable on the serial embed path. See issue #5.
-    vecs = [mlx_embeddings.generate(model, proc, [t]).text_embeds.tolist()[0] for t in texts]
-    prompt_tokens = sum(len(proc.encode(t, truncation=True, max_length=512)) for t in texts)
+    if not texts:
+        return [], 0
+
+    tok_ids = [proc.encode(t, truncation=True, max_length=512) for t in texts]
+    prompt_tokens = sum(len(ids) for ids in tok_ids)
+
+    cache = _embed_cache() if EMBED_CACHE else None
+    vecs = [None] * len(texts)
+    pending = {}  # content hash -> indices sharing that exact text (dedups repeats in-batch too)
+    for i, t in enumerate(texts):
+        h = _embed_hash(t)
+        cached = cache.get(h) if cache is not None else None
+        if cached is not None:
+            vecs[i] = cached
+        else:
+            pending.setdefault(h, []).append(i)
+
+    if pending:
+        # mlx_embeddings.generate pads to the longest text in the batch; pooling/normalization
+        # over the padded positions yields all-NaN embeddings for the shorter texts (and
+        # json.dumps then emits the bare literal `NaN`, invalid JSON for strict clients).
+        # Bucketing by exact tokenized length before batching sidesteps the padding entirely —
+        # every text in a bucket is the same length, so there is nothing to pad. See issue #5.
+        buckets = {}
+        for h, idxs in pending.items():
+            buckets.setdefault(len(tok_ids[idxs[0]]), []).append(h)
+        for hs in buckets.values():
+            batch_texts = [texts[pending[h][0]] for h in hs]
+            out = mlx_embeddings.generate(model, proc, batch_texts).text_embeds.tolist()
+            for h, v in zip(hs, out, strict=True):
+                for i in pending[h]:
+                    vecs[i] = v
+                if cache is not None:
+                    cache.put(h, v)
+
     return vecs, prompt_tokens
 
 

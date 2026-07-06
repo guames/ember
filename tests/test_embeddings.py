@@ -2,7 +2,10 @@
 
 Regression for issue #5: mlx_embeddings.generate pads to the longest text in a batch, so
 pooling over the padded positions returns all-NaN embeddings for the shorter texts. The fix
-embeds one text at a time; these tests lock that invariant without loading any model.
+(issue #24) buckets by exact tokenized length before batching — same-length texts share no
+padding, so they can go through generate() as a real batch, while different-length texts must
+never land in the same call. These tests lock both the length-bucketing invariant and the
+content-hash cache (issue #24) without loading any model.
 """
 
 import types
@@ -12,37 +15,75 @@ import mlx_embeddings
 from ember import server
 
 
-def _fake_out(vec):
-    """Mimic mlx_embeddings' return: `.text_embeds.tolist()` -> [[...]] (one row per call)."""
-    return types.SimpleNamespace(text_embeds=types.SimpleNamespace(tolist=lambda: [vec]))
+def _fake_out(vecs):
+    """Mimic mlx_embeddings' return: `.text_embeds.tolist()` -> one row per input text."""
+    return types.SimpleNamespace(text_embeds=types.SimpleNamespace(tolist=lambda: vecs))
 
 
 class _FakeProc:
-    """Fake tokenizer: one token per character, so expected counts are easy to assert."""
+    """Fake tokenizer: one token per character, so expected counts/lengths are easy to assert."""
 
     def encode(self, text, truncation=True, max_length=512):
         return list(text)[:max_length]
 
 
-def test_embeddings_one_text_per_call(monkeypatch):
-    """Each text must be embedded on its own — never batched (that is what NaNs the short ones)."""
-    proc = _FakeProc()
-    monkeypatch.setattr(server, "em_model", lambda: ("M", proc))
+class _FakeCache:
+    """In-memory stand-in for _EmbedCache: same get/put shape, no disk."""
+
+    def __init__(self):
+        self.store = {}
+        self.puts = []
+
+    def get(self, h):
+        return self.store.get(h)
+
+    def put(self, h, vec):
+        self.puts.append(h)
+        self.store[h] = vec
+
+
+def test_embeddings_never_mixes_lengths_in_one_batch(monkeypatch):
+    """Different-length texts must never share a generate() call (that is what NaNs the short
+    ones); same-length texts are batched together."""
+    monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
+    monkeypatch.setattr(server, "EMBED_CACHE", False)
     calls = []
 
     def fake_generate(model, p, texts):
-        assert (model, p) == ("M", proc)
-        assert len(texts) == 1  # the invariant: never a mixed-length batch
-        calls.append(texts[0])
-        return _fake_out([float(len(texts[0]))] * 3)
+        assert model == "M"
+        lens = {len(t) for t in texts}
+        assert len(lens) == 1  # the invariant: never a mixed-length batch
+        calls.append(list(texts))
+        return _fake_out([[float(len(t))] * 3 for t in texts])
 
     monkeypatch.setattr(mlx_embeddings, "generate", fake_generate)
 
-    vecs, prompt_tokens = server.embeddings(["aa", "bbbb", "c"])
+    # "aa" and "cd" share length 2 and must batch together; "efg" (length 3) is separate.
+    vecs, prompt_tokens = server.embeddings(["aa", "cd", "efg"])
 
-    assert calls == ["aa", "bbbb", "c"]  # order preserved
-    assert vecs == [[2.0, 2.0, 2.0], [4.0, 4.0, 4.0], [1.0, 1.0, 1.0]]
-    assert prompt_tokens == 2 + 4 + 1  # sum of per-text token counts
+    assert calls == [["aa", "cd"], ["efg"]]
+    assert vecs == [[2.0, 2.0, 2.0], [2.0, 2.0, 2.0], [3.0, 3.0, 3.0]]
+    assert prompt_tokens == 2 + 2 + 3
+
+
+def test_embeddings_dedups_repeated_text_within_one_call(monkeypatch):
+    """The same text appearing twice in one request should only cost one forward pass."""
+    monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
+    monkeypatch.setattr(server, "EMBED_CACHE", False)
+    calls = []
+
+    def fake_generate(model, p, texts):
+        calls.append(list(texts))
+        return _fake_out([[float(len(t))] for t in texts])
+
+    monkeypatch.setattr(mlx_embeddings, "generate", fake_generate)
+
+    vecs, prompt_tokens = server.embeddings(["same", "same", "other"])
+
+    assert calls == [["same"], ["other"]]  # "same" embedded once despite appearing twice
+    assert vecs[0] == vecs[1] == [4.0]
+    assert vecs[2] == [5.0]
+    assert prompt_tokens == 4 + 4 + 5  # usage still reflects what was actually requested
 
 
 def test_embeddings_empty_input(monkeypatch):
@@ -51,6 +92,44 @@ def test_embeddings_empty_input(monkeypatch):
         mlx_embeddings, "generate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called"))
     )
     assert server.embeddings([]) == ([], 0)
+
+
+def test_embeddings_cache_hit_skips_generate(monkeypatch):
+    """A text already in the content-hash cache must not trigger a forward pass at all."""
+    monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
+    monkeypatch.setattr(server, "EMBED_CACHE", True)
+    cache = _FakeCache()
+    monkeypatch.setattr(server, "_embed_cache", lambda: cache)
+    cache.store[server._embed_hash("cached")] = [9.0, 9.0]
+
+    calls = []
+
+    def fake_generate(model, p, texts):
+        calls.append(list(texts))
+        return _fake_out([[float(len(t))] for t in texts])
+
+    monkeypatch.setattr(mlx_embeddings, "generate", fake_generate)
+
+    vecs, prompt_tokens = server.embeddings(["cached", "new"])
+
+    assert calls == [["new"]]  # only the uncached text hit the model
+    assert vecs == [[9.0, 9.0], [3.0]]
+    assert prompt_tokens == 6 + 3
+    assert cache.puts == [server._embed_hash("new")]  # newly embedded text gets cached
+
+
+def test_embeddings_cache_disabled_never_touches_cache(monkeypatch):
+    monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
+    monkeypatch.setattr(server, "EMBED_CACHE", False)
+
+    def boom():
+        raise AssertionError("_embed_cache() should not be called when EMBED_CACHE is False")
+
+    monkeypatch.setattr(server, "_embed_cache", boom)
+    monkeypatch.setattr(mlx_embeddings, "generate", lambda m, p, t: _fake_out([[1.0] for _ in t]))
+
+    vecs, _ = server.embeddings(["x"])
+    assert vecs == [[1.0]]
 
 
 class _FakeJob:
