@@ -32,8 +32,7 @@ def _put(name, size_gb, last):
         "last": last,
         "ka": -1,
         "vlm": False,
-        "pc": None,
-        "pctoks": None,
+        "slots": [{"pc": None, "pctoks": None, "last": 0.0}],
     }
 
 

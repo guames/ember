@@ -28,6 +28,11 @@ Not yet published to PyPI — see [Publishing](README.md#publishing-maintainer).
 - OpenAI-shaped `usage` (`prompt_tokens`/`completion_tokens`/`total_tokens` +
   `prompt_tokens_details.cached_tokens`) on chat, FIM, and embeddings responses; chat
   streaming exposes it via `stream_options: {"include_usage": true}` (#18).
+- **Multi-slot KV prompt cache per chat runner** (`MLX_PROMPT_CACHE_SLOTS`, default 2):
+  interleaved conversations on the same model now get their own cache slot instead of
+  evicting each other every turn. Slot selection (longest-common-prefix match, LRU
+  eviction when the pool is full) is the pure `memory_policy.select_prompt_cache_slot`
+  (#21).
 
 ## [0.1.0] — 2026-06-17
 

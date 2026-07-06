@@ -59,8 +59,9 @@ backend…). Ember's niche is being the **unified, memory-adaptive** one for a s
 - 🧠 **Adaptive memory.** Multiple models stay hot while RAM allows (LRU eviction,
   idle-unload, `keep_alive`). Under pressure it **drops KV caches oldest-first** before
   evicting a whole model.
-- ⚡ **Prompt cache (prefix reuse).** Llama.cpp/Ollama-style longest-common-prefix KV reuse
-  → much lower TTFT when continuing a conversation. Zero-copy.
+- ⚡ **Prompt cache (prefix reuse).** Llama.cpp/Ollama-style longest-common-prefix KV reuse,
+  multi-slot per runner so interleaved conversations don't evict each other → much lower
+  TTFT when continuing a conversation. Zero-copy.
 - 🎯 **Real constrained decoding.** `response_format` with JSON schema is *guaranteed* via
   [llguidance](https://github.com/guidance-ai/llguidance) (token-level masking), not prompt
   nudging.
@@ -224,6 +225,7 @@ Management commands talk to a running server (`--url`, default `http://127.0.0.1
 | `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model |
 | `MLX_MAX_QUEUE` | `32` | queue depth before returning 503 |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse |
+| `MLX_PROMPT_CACHE_SLOTS` | `2` | KV-cache slots per runner (interleaved conversations) |
 | `MLX_KV_BITS` | off | `8`/`4` to quantize the KV cache (~2× smaller at 8-bit) |
 | `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
 | `MLX_WIRED_LIMIT_GB` | auto by RAM | wired-memory ceiling (RAM − headroom, headroom scales with RAM) |

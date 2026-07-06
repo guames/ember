@@ -62,7 +62,8 @@ LM Studio…). O nicho do Ember é ser o **unificado e adaptativo de memória** 
   descarga por ociosidade, `keep_alive`). Sob pressão, ele **dropa os caches KV do mais antigo
   primeiro** antes de evictar um modelo inteiro.
 - ⚡ **Prompt cache (reuso de prefixo).** Reuso de KV por maior-prefixo-comum no estilo
-  llama.cpp/Ollama → TTFT muito menor ao continuar uma conversa. Sem cópia.
+  llama.cpp/Ollama, com múltiplos slots por runner para conversas intercaladas não se
+  atropelarem → TTFT muito menor ao continuar uma conversa. Sem cópia.
 - 🎯 **Decodificação realmente restrita.** `response_format` com JSON schema é *garantido* via
   [llguidance](https://github.com/guidance-ai/llguidance) (máscara em nível de token), não um
   empurrãozinho no prompt.
@@ -228,6 +229,7 @@ Os comandos de gerência falam com um servidor em execução (`--url`, padrão
 | `MLX_IDLE_TIMEOUT` | `300` | segundos de ociosidade antes de descarregar um modelo de chat |
 | `MLX_MAX_QUEUE` | `32` | profundidade da fila antes de retornar 503 |
 | `MLX_PROMPT_CACHE` | `1` | reuso de cache KV por prefixo |
+| `MLX_PROMPT_CACHE_SLOTS` | `2` | slots de cache KV por runner (conversas intercaladas) |
 | `MLX_KV_BITS` | off | `8`/`4` para quantizar o cache KV (~2× menor em 8 bits) |
 | `MLX_PREFILL_STEP` | `512` | tamanho do bloco de prefill (menor pico de RAM) |
 | `MLX_WIRED_LIMIT_GB` | auto pela RAM | teto de memória wired (RAM − margem, a margem escala com a RAM) |
