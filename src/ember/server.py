@@ -91,6 +91,7 @@ MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", str(_SCALED["min_free_gb"]
 MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # floor to drop KV cache
 DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default_est_gb"])))  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
+EMBED_CHUNK = int(os.environ.get("MLX_EMBED_CHUNK", "8"))  # texts per embed slice
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
 PROMPT_CACHE_SLOTS = max(1, int(os.environ.get("MLX_PROMPT_CACHE_SLOTS", "2")))  # KV slots/runner
 _KVB = os.environ.get("MLX_KV_BITS", "8")  # 8/4 = quantize KV cache; 0 = fp16
@@ -1036,8 +1037,25 @@ def _run_fim(job):
 
 
 def _run_embed(job):
+    """Embeds job.payload["texts"] in slices of EMBED_CHUNK. A large batch would otherwise
+    hold the single worker (and thus an in-progress chat stream) for the whole job; instead,
+    after each slice it re-queues itself and returns, letting _drain_short's caller run a
+    chat step in between (issue #25)."""
     try:
-        job.out.put(("result", embeddings(job.payload["texts"])))
+        texts = job.payload["texts"]
+        vecs = job.payload.setdefault("_vecs", [])
+        while len(vecs) < len(texts):
+            chunk = texts[len(vecs) : len(vecs) + EMBED_CHUNK]
+            chunk_vecs, chunk_tokens = embeddings(chunk)
+            vecs.extend(chunk_vecs)
+            job.payload["_tokens"] = job.payload.get("_tokens", 0) + chunk_tokens
+            if len(vecs) < len(texts):
+                try:
+                    _q.put_nowait((P_SHORT, next(_seq), job))
+                    return  # yield the remaining slices to the next _drain_short call
+                except queue.Full:
+                    continue  # queue momentarily full: keep going inline rather than drop it
+        job.out.put(("result", (vecs, job.payload["_tokens"])))
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
 
@@ -1123,23 +1141,22 @@ def _dispatch(job):
 
 
 def _drain_short():
-    """Runs high-priority (short) jobs that arrived during chat generation."""
-    while True:
+    """Runs at most one queued high-priority (short) job, then returns. Only one job (or, for
+    a chunked embed job, one slice of it — see _run_embed) runs per call, so a large job can't
+    monopolize the worker: control returns to the chat generation loop between calls."""
+    try:
+        item = _q.get_nowait()
+    except queue.Empty:
+        return
+    prio, _seqn, job = item
+    if prio <= P_SHORT:
+        _dispatch(job)
+    else:  # it's a chat job: put it back, nothing to drain
         try:
-            item = _q.get_nowait()
-        except queue.Empty:
-            return
-        prio, _seqn, job = item
-        if prio <= P_SHORT:
+            _q.put_nowait(item)
+        except queue.Full:
             _dispatch(job)
-            _q.task_done()
-        else:  # it's a chat job: put it back and stop draining
-            try:
-                _q.put_nowait(item)
-            except queue.Full:
-                _dispatch(job)
-                _q.task_done()
-            return
+    _q.task_done()
 
 
 def _worker():

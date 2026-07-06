@@ -51,3 +51,80 @@ def test_embeddings_empty_input(monkeypatch):
         mlx_embeddings, "generate", lambda *a, **k: (_ for _ in ()).throw(AssertionError("called"))
     )
     assert server.embeddings([]) == ([], 0)
+
+
+class _FakeJob:
+    """Minimal stand-in for server.Job: just payload + out, no thread/queue plumbing."""
+
+    def __init__(self, texts):
+        self.kind = "embed"
+        self.payload = {"texts": texts}
+        self.out = server.queue.Queue()
+
+
+def test_run_embed_chunks_and_yields(monkeypatch):
+    """Regression for issue #25: a batch bigger than EMBED_CHUNK must not be embedded in one
+    shot — _run_embed should slice it, re-queue the remainder, and return in between so a
+    chat step gets a chance to run before the next slice."""
+    monkeypatch.setattr(server, "EMBED_CHUNK", 2)
+    calls = []
+
+    def fake_embeddings(texts):
+        calls.append(list(texts))
+        return [[float(len(t))] for t in texts], sum(len(t) for t in texts)
+
+    monkeypatch.setattr(server, "embeddings", fake_embeddings)
+
+    texts = ["a", "bb", "ccc", "dddd", "e"]  # 5 texts, chunk=2 -> 3 slices
+    job = _FakeJob(texts)
+
+    server._run_embed(job)
+    assert calls == [["a", "bb"]]  # only the first slice ran
+    assert job.out.empty()  # not done yet: nothing posted to the caller
+    assert server._q.qsize() == 1  # continuation re-queued for the next _drain_short call
+
+    # drain the rest as _drain_short would, one slice per call
+    server._drain_short()
+    assert calls == [["a", "bb"], ["ccc", "dddd"]]
+    assert job.out.empty()
+    assert server._q.qsize() == 1
+
+    server._drain_short()
+    assert calls == [["a", "bb"], ["ccc", "dddd"], ["e"]]
+    kind, (vecs, prompt_tokens) = job.out.get_nowait()
+    assert kind == "result"
+    assert vecs == [[1.0], [2.0], [3.0], [4.0], [1.0]]
+    assert prompt_tokens == sum(len(t) for t in texts)
+
+
+def test_run_embed_single_slice_batch(monkeypatch):
+    """A batch that fits in one slice should still finish in a single _run_embed call."""
+    monkeypatch.setattr(server, "EMBED_CHUNK", 8)
+    monkeypatch.setattr(server, "embeddings", lambda texts: ([[1.0]] * len(texts), len(texts)))
+
+    job = _FakeJob(["x", "y"])
+    server._run_embed(job)
+
+    assert server._q.empty()
+    kind, (vecs, prompt_tokens) = job.out.get_nowait()
+    assert kind == "result"
+    assert vecs == [[1.0], [1.0]]
+    assert prompt_tokens == 2
+
+
+def test_drain_short_yields_after_one_job(monkeypatch):
+    """_drain_short must process exactly one queued short job per call — not drain the whole
+    queue — so a chat generation loop calling it between tokens actually gets control back."""
+    ran = []
+    monkeypatch.setattr(server, "_dispatch", lambda job: ran.append(job))
+
+    server._q.put_nowait((server.P_SHORT, next(server._seq), "job-a"))
+    server._q.put_nowait((server.P_SHORT, next(server._seq), "job-b"))
+
+    server._drain_short()
+    assert ran == ["job-a"]
+    assert server._q.qsize() == 1
+
+    server._drain_short()
+    assert ran == ["job-a", "job-b"]
+    assert server._q.empty()
