@@ -15,14 +15,16 @@ class FakeCache(list):
 
 @pytest.fixture
 def clean(monkeypatch):
-    monkeypatch.setattr(server, "_ac", {"model": object(), "tok": object(), "pc": None, "pctoks": None})
+    monkeypatch.setattr(
+        server, "_ac", {"model": object(), "tok": object(), "pc": None, "pctoks": None}
+    )
     monkeypatch.setattr(server, "PROMPT_CACHE", True)
 
     trims = []
 
     def fake_trim(cache, n):
         trims.append(n)
-        del cache[max(0, len(cache) - n):]
+        del cache[max(0, len(cache) - n) :]
         return n
 
     monkeypatch.setattr(server, "trim_prompt_cache", fake_trim)

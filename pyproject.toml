@@ -29,7 +29,7 @@ dependencies = [
 [project.optional-dependencies]
 # Vision (mlx-vlm) and structured output/response_format (llguidance via mlx_vlm.structured).
 vision = ["mlx-vlm>=0.1", "llguidance>=0.7"]
-dev = ["pytest>=7", "ruff>=0.5"]
+dev = ["pytest>=7", "ruff==0.15.17"]
 
 [project.urls]
 Homepage = "https://github.com/guames/ember"
