@@ -133,12 +133,13 @@ def test_embeddings_cache_disabled_never_touches_cache(monkeypatch):
 
 
 class _FakeJob:
-    """Minimal stand-in for server.Job: just payload + out, no thread/queue plumbing."""
+    """Minimal stand-in for server.Job: just payload + out + cancel, no thread/queue plumbing."""
 
     def __init__(self, texts):
         self.kind = "embed"
         self.payload = {"texts": texts}
         self.out = server.queue.Queue()
+        self.cancel = server.threading.Event()
 
 
 def test_run_embed_chunks_and_yields(monkeypatch):

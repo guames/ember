@@ -74,7 +74,9 @@ import json
 import os
 import queue
 import re
+import select
 import signal
+import socket
 import sqlite3
 import threading
 import time
@@ -269,6 +271,7 @@ _em = {"model": None, "proc": None}  # embed (fixed)
 P_SHORT, P_CHAT = 0, 1  # lower = higher priority
 _q = queue.PriorityQueue(maxsize=MAX_QUEUE)
 _seq = itertools.count()
+JOB_WAIT_POLL_S = 0.5  # how often a handler blocked on job.out re-checks the client (issue #31)
 
 
 class Job:
@@ -1099,6 +1102,8 @@ def _store_ac_cache(all_toks, cache):
 
 # ---------------------------------------------------------------- GPU worker
 def _run_chat(job):
+    if job.cancel.is_set():  # client gone while this job was still queued (issue #31)
+        return
     t0 = time.monotonic()
     name, body = job.payload["name"], job.payload["body"]
     messages = body.get("messages", [])
@@ -1244,6 +1249,8 @@ def _run_chat(job):
 
 
 def _run_fim(job):
+    if job.cancel.is_set():  # client gone while this job was still queued (issue #31)
+        return
     t0 = time.monotonic()
     retried_oom = False
     while True:
@@ -1265,7 +1272,11 @@ def _run_embed(job):
     """Embeds job.payload["texts"] in slices of EMBED_CHUNK. A large batch would otherwise
     hold the single worker (and thus an in-progress chat stream) for the whole job; instead,
     after each slice it re-queues itself and returns, letting _drain_short's caller run a
-    chat step in between (issue #25)."""
+    chat step in between (issue #25). Also bails out early if the client is already gone,
+    whether that's before the first slice (still queued) or between re-queued slices
+    (issue #31)."""
+    if job.cancel.is_set():
+        return
     t0 = job.payload.setdefault("_t0", time.monotonic())
     try:
         texts = job.payload["texts"]
@@ -1481,6 +1492,35 @@ class Handler(BaseHTTPRequestHandler):
             err_code="invalid_api_key",
         )
 
+    def _client_gone(self):
+        """Non-blocking check for whether the client's TCP connection is still open.
+        Used by the job-wait loops below to cancel a job (streaming, non-streaming, or still
+        queued -- job.out only ever produces its first message once the worker dispatches it)
+        once nobody is left to receive the response (issue #31). A closed connection reads as
+        EOF (b"") on a MSG_PEEK; a reset/broken one raises OSError. Data other than EOF (e.g. a
+        pipelined next request under keep-alive) means the client is still there."""
+        try:
+            if not select.select([self.connection], [], [], 0)[0]:
+                return False
+            return self.connection.recv(1, socket.MSG_PEEK) == b""
+        except OSError:
+            return True
+
+    def _wait_out(self, job):
+        """Blocks until job.out has a message, polling `_client_gone` while it waits instead
+        of blocking forever -- covers a job that hasn't been dispatched yet (job.out stays
+        empty for the whole time it sits in the queue) as well as one that's running but
+        producing nothing for a while (issue #31). Returns (None, None) once the client is
+        confirmed gone, after marking the job cancelled so the worker (queued or running)
+        stops without doing further work for nobody."""
+        while True:
+            try:
+                return job.out.get(timeout=JOB_WAIT_POLL_S)
+            except queue.Empty:
+                if self._client_gone():
+                    job.cancel.set()
+                    return None, None
+
     def do_GET(self):
         path = self.path.rstrip("/")
         if path.endswith("/health"):
@@ -1566,7 +1606,9 @@ class Handler(BaseHTTPRequestHandler):
             self._collect_out(job, cid, created, name)
 
     def _stream_out(self, job, cid, created, name, include_usage):
-        first, data = job.out.get()
+        first, data = self._wait_out(job)
+        if first is None:  # client gone before the job ever produced anything (incl. queued)
+            return
         if first == "error":
             return self._error(500, data)
         self.send_response(200)
@@ -1586,7 +1628,9 @@ class Handler(BaseHTTPRequestHandler):
         try:
             send({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}}]})
             while True:
-                kind, data = job.out.get()
+                kind, data = self._wait_out(job)
+                if kind is None:  # client gone mid-stream, no one left to send [DONE] to
+                    return
                 if kind == "delta":
                     if data:
                         send({**base, "choices": [{"index": 0, "delta": {"content": data}}]})
@@ -1634,7 +1678,9 @@ class Handler(BaseHTTPRequestHandler):
         text = ""
         tool_calls = None
         while True:
-            kind, data = job.out.get()
+            kind, data = self._wait_out(job)
+            if kind is None:  # client gone (incl. while the job was still queued)
+                return
             if kind == "delta":
                 text += data
             elif kind == "toolcalls":
@@ -1666,7 +1712,9 @@ class Handler(BaseHTTPRequestHandler):
         job = _submit(P_SHORT, "fim", {"body": body})
         if job is None:
             return self._error(503, "queue full (maxQueue)", err_code="queue_full")
-        kind, data = job.out.get()
+        kind, data = self._wait_out(job)
+        if kind is None:  # client gone (incl. while the job was still queued)
+            return
         if kind == "error":
             return self._error(500, data)
         text, usage = data
@@ -1689,7 +1737,9 @@ class Handler(BaseHTTPRequestHandler):
         job = _submit(P_SHORT, "embed", {"texts": texts})
         if job is None:
             return self._error(503, "queue full (maxQueue)", err_code="queue_full")
-        kind, data = job.out.get()
+        kind, data = self._wait_out(job)
+        if kind is None:  # client gone (incl. while the job was still queued)
+            return
         if kind == "error":
             return self._error(500, data)
         vecs, prompt_tokens = data
