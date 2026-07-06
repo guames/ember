@@ -83,7 +83,7 @@ keep-alive.
 | `MLX_DEFAULT_EST_GB` | auto by RAM (`8.0` on 24GB) | size guess for an unknown incoming model |
 | `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model (`0` = never) |
 | `MLX_MAX_QUEUE` | `32` | queue depth before returning `503` |
-| `MLX_KV_BITS` | off | `8`/`4` to quantize the KV cache (~2× smaller at 8-bit) |
+| `MLX_KV_BITS` | `8` | KV cache quantization bits; `4` for more aggressive, `0` for fp16 |
 | `MLX_KV_GROUP_SIZE` | `64` | KV quantization group size |
 | `MLX_KV_QUANT_START` | `0` | quantize the KV cache from token N onward |
 | `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |

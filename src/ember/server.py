@@ -32,9 +32,9 @@ MLX_PROMPT_CACHE=0 turns matching off.
 Under RAM pressure (free < MLX_MIN_FREE_CACHE_GB, default 1GB) the router drops the KV
 caches (LRU, oldest first) BEFORE evicting a whole model.
 
-Quantized KV cache (optional, more context in the same RAM): MLX_KV_BITS=8 (or 4) enables it;
-8-bit is ~2x smaller than fp16 and practically lossless. Compatible with the prompt cache (the
-QuantizedKVCache is trimmable). Off by default.
+Quantized KV cache (more context in the same RAM): 8-bit by default (~2x smaller than fp16,
+practically lossless); MLX_KV_BITS=4 for more aggressive quantization, MLX_KV_BITS=0 for fp16.
+Compatible with the prompt cache (the QuantizedKVCache is trimmable).
 
 Memory tuning at boot: wired_limit (resident weights, no OS compression near the
 limit) + chunked prefill (MLX_PREFILL_STEP, peak RAM ↓ on a cold long prompt; with
@@ -43,7 +43,7 @@ the prompt cache the normal prefill is already just the suffix, so it barely cos
 Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MAX_RUNNERS(auto by RAM, 4 on 24GB) MLX_MIN_FREE_GB(auto by RAM, 2.0 on 24GB)
       MLX_MIN_FREE_CACHE_GB(1.0) MLX_DEFAULT_EST_GB(auto by RAM, 8.0 on 24GB)
-      MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(off) MLX_KV_GROUP_SIZE(64)
+      MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(8) MLX_KV_GROUP_SIZE(64)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off)
 
@@ -93,7 +93,7 @@ DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
 PROMPT_CACHE_SLOTS = max(1, int(os.environ.get("MLX_PROMPT_CACHE_SLOTS", "2")))  # KV slots/runner
-_KVB = os.environ.get("MLX_KV_BITS")  # 8/4 = quantize KV cache
+_KVB = os.environ.get("MLX_KV_BITS", "8")  # 8/4 = quantize KV cache; 0 = fp16
 KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
 KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantize from token N onward
