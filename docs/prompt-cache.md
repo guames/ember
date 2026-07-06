@@ -51,10 +51,11 @@ their own slot instead of evicting each other's cache every turn.
 
 ## Quantized KV cache
 
-To fit more context in the same RAM, quantize the KV cache with `MLX_KV_BITS=8` (or `4`).
-8-bit is ~2× smaller than fp16 and practically lossless, and it stays compatible with the
-prompt cache (the quantized cache is trimmable). Off by default. Related knobs:
-`MLX_KV_GROUP_SIZE` (default 64) and `MLX_KV_QUANT_START` (quantize from token N onward).
+The KV cache is quantized to 8-bit by default to fit more context in the same RAM — 8-bit
+is ~2× smaller than fp16 and practically lossless, and it stays compatible with the
+prompt cache (the quantized cache is trimmable). Set `MLX_KV_BITS=4` for more aggressive
+quantization, or `MLX_KV_BITS=0` for fp16. Related knobs: `MLX_KV_GROUP_SIZE` (default 64)
+and `MLX_KV_QUANT_START` (quantize from token N onward).
 
 ## Manually clearing it
 
