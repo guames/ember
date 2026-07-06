@@ -210,15 +210,22 @@ Management commands talk to a running server (`--url`, default `http://127.0.0.1
 | `POST /v1/completions` | FIM autocomplete (kept hot) |
 | `POST /v1/embeddings` | embeddings (kept hot) |
 | `GET /v1/models` | list configured models |
+| `GET /health` | trivial 200 for process supervisors (unauthenticated, no `EMBER_API_KEY` needed) |
 | `GET /status` | hot models, memory, queue, policy |
 | `GET /memory` | MLX + system memory |
 | `POST /unload` | unload `chat` / `all` / `<model>` |
+
+`/v1/*` routes require `Authorization: Bearer <key>` when `EMBER_API_KEY` is set (off by
+default). `SIGTERM` stops accepting new requests, waits for the in-flight job to finish
+(up to `EMBER_SHUTDOWN_TIMEOUT`), then exits.
 
 ## Configuration (env)
 
 | Var | Default | Meaning |
 |---|---|---|
 | `MLX_ROUTER_PORT` / `MLX_ROUTER_HOST` | `8000` / `127.0.0.1` | bind address |
+| `EMBER_API_KEY` | off | require `Authorization: Bearer <key>` on `/v1/*` |
+| `EMBER_SHUTDOWN_TIMEOUT` | `30` | seconds to drain the in-flight job on `SIGTERM` |
 | `MLX_MAX_RUNNERS` | auto by RAM (`4` on 24GB) | max models hot at once |
 | `MLX_MIN_FREE_GB` | auto by RAM (`2.0` on 24GB) | evict a model below this free RAM |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | drop KV caches below this free RAM |

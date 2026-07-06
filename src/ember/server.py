@@ -9,6 +9,7 @@ Serves 3 capabilities, all on MLX:
   • /v1/completions       -> FIM autocomplete (Qwen2.5-Coder-1.5B base, pinned in RAM)
   • /v1/embeddings        -> embeddings (nomic-modernbert, pinned in RAM)
 Operations/observability:
+  • GET  /health          -> trivial 200 for process supervisors (unauthenticated)
   • GET  /status          -> hot models + memory + queue + policy
   • GET  /memory          -> MLX and system memory (in use / free)
   • POST /unload {target}  -> unload ('chat' | 'all' | '<model-name>')
@@ -46,6 +47,13 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(8) MLX_KV_GROUP_SIZE(64)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
+      EMBER_API_KEY(off) EMBER_SHUTDOWN_TIMEOUT(30)
+
+Ops: GET /health is an unauthenticated 200 for process supervisors (LaunchAgent, systemd).
+     EMBER_API_KEY, when set, requires `Authorization: Bearer <key>` on /v1/* routes only
+     (off by default; never required for the default localhost-only setup). SIGTERM stops
+     accepting new requests, waits up to EMBER_SHUTDOWN_TIMEOUT s for the in-flight job to
+     finish, then exits.
 
     ember                          # CLI (port 8000 or env MLX_ROUTER_PORT)
     python -m ember
@@ -58,6 +66,7 @@ import json
 import os
 import queue
 import re
+import signal
 import sqlite3
 import threading
 import time
@@ -108,6 +117,12 @@ PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # prefill chunk (
 WIRED_LIMIT_GB = float(os.environ.get("MLX_WIRED_LIMIT_GB", "0"))  # 0 = auto (total-headroom, RAM-scaled)
 CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = MLX default (no cap)
 _DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = never expires
+API_KEY = os.environ.get("EMBER_API_KEY") or None  # unset = no auth (default, localhost-only)
+SHUTDOWN_TIMEOUT = float(os.environ.get("EMBER_SHUTDOWN_TIMEOUT", "30"))  # s to drain on SIGTERM
+
+# ---- shutdown state (set by the SIGTERM handler; read by do_POST and the worker) ----
+_shutting_down = threading.Event()
+_worker_busy = threading.Event()
 
 
 def _kv_kwargs():
@@ -1236,12 +1251,25 @@ def _drain_short():
 def _worker():
     while True:
         item = _q.get()
+        _worker_busy.set()
         try:
             _dispatch(item[2])
         except Exception as e:  # noqa: BLE001
             print(f"[router] worker error: {e}", flush=True)
         finally:
+            _worker_busy.clear()
             _q.task_done()
+
+
+def _wait_for_drain(timeout):
+    """Blocks (up to `timeout` s) until the GPU queue is empty and the worker is idle.
+    Used on SIGTERM to let an in-flight generation finish before the process exits."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _q.empty() and not _worker_busy.is_set():
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def _watchdog():
@@ -1292,8 +1320,27 @@ class Handler(BaseHTTPRequestHandler):
             err_type = "internal_error" if code >= 500 else "invalid_request_error"
         self._json(code, {"error": _error_obj(message, err_type, err_code)})
 
+    def _authorized(self):
+        """True if EMBER_API_KEY is unset (auth off, default) or the request carries a
+        matching `Authorization: Bearer <key>` header."""
+        if not API_KEY:
+            return True
+        return self.headers.get("Authorization") == f"Bearer {API_KEY}"
+
+    def _reject_unauthorized(self):
+        self._error(
+            401,
+            "invalid or missing API key",
+            err_type="authentication_error",
+            err_code="invalid_api_key",
+        )
+
     def do_GET(self):
         path = self.path.rstrip("/")
+        if path.endswith("/health"):
+            return self._json(200, {"status": "ok"})
+        if path.startswith("/v1") and not self._authorized():
+            return self._reject_unauthorized()
         if path.endswith("/v1/models"):
             ids = list(CFG) + [AC_NAME, EM_NAME]
             self._json(200, {"object": "list", "data": [{"id": n, "object": "model"} for n in ids]})
@@ -1323,6 +1370,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = self.path.rstrip("/")
+        if _shutting_down.is_set():
+            return self._error(503, "server is shutting down", err_code="shutting_down")
+        if path.startswith("/v1") and not self._authorized():
+            return self._reject_unauthorized()
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         try:
@@ -1533,7 +1584,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host=None, port=None):
-    """Starts the HTTP server and blocks (serve_forever)."""
+    """Starts the HTTP server and blocks until SIGTERM (or Ctrl-C).
+
+    serve_forever() runs on a background thread so the main thread is free to receive
+    the signal and drive a graceful shutdown: stop accepting new requests/jobs (see
+    do_POST's _shutting_down check), wait up to SHUTDOWN_TIMEOUT s for the in-flight
+    GPU job to finish, then close the socket and return."""
     if port is None:
         port = int(os.environ.get("MLX_ROUTER_PORT", "8000"))
     if host is None:
@@ -1542,13 +1598,35 @@ def serve(host=None, port=None):
     print(
         f"[ember] http://{host}:{port}/v1  (chat:{len(CFG)} + ac + embed)  "
         f"[runners<={MAX_RUNNERS}, min_free={MIN_FREE_GB:.1f}GB, idle={idle}, "
-        f"queue<={MAX_QUEUE}]",
+        f"queue<={MAX_QUEUE}, auth={'on' if API_KEY else 'off'}]",
         flush=True,
     )
     _tune_memory()
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    httpd = ThreadingHTTPServer((host, port), Handler)
+    stop = threading.Event()
+
+    def _on_sigterm(signum, frame):
+        print("[ember] SIGTERM: draining in-flight job before exit", flush=True)
+        _shutting_down.set()
+        stop.set()
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        while not stop.is_set():
+            stop.wait(0.5)
+    except KeyboardInterrupt:
+        _shutting_down.set()
+    if not _wait_for_drain(SHUTDOWN_TIMEOUT):
+        print(
+            f"[ember] shutdown: job still running after {SHUTDOWN_TIMEOUT:.0f}s, exiting anyway",
+            flush=True,
+        )
+    httpd.shutdown()
+    httpd.server_close()
+    print("[ember] shutdown complete", flush=True)
 
 
 def main():
