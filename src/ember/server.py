@@ -129,7 +129,7 @@ def _tune_memory():
 _reg_lock = threading.Lock()
 _chat = {}  # name -> {model, tok, size_gb, last, ka}
 _sizes = {}  # name -> measured resident size_gb from a prior load (for pre-load estimates)
-_ac = {"model": None, "tok": None}  # autocomplete (fixed)
+_ac = {"model": None, "tok": None, "pc": None, "pctoks": None}  # autocomplete (fixed)
 _em = {"model": None, "proc": None}  # embed (fixed)
 
 # ---- GPU queue (1 worker) ----
@@ -638,18 +638,31 @@ def gen_fim(body):
     pre = body.get("prompt", "")
     suf = body.get("suffix", "") or ""
     prompt = f"<|fim_prefix|>{pre}<|fim_suffix|>{suf}<|fim_middle|>"
+    ptoks = tok.encode(prompt, add_special_tokens=False)
     stops = body.get("stop") or []
     if isinstance(stops, str):
         stops = [stops]
     sampler = make_sampler(temp=body.get("temperature", 0.1))
-    out = []
+    cache, suffix, reused = _reuse_ac_cache(model, ptoks)
+    out, gen_ids = [], []
     for r in stream_generate(
-        model, tok, prompt, max_tokens=body.get("max_tokens") or 256, sampler=sampler
+        model,
+        tok,
+        mx.array(suffix),
+        prompt_cache=cache,
+        max_tokens=body.get("max_tokens") or 256,
+        sampler=sampler,
+        prefill_step_size=PREFILL_STEP,
+        **_kv_kwargs(),
     ):
         out.append(r.text)
+        gen_ids.append(int(r.token))
         text = "".join(out)
         if "<|" in text or any(s and s in text for s in stops):
             break
+    _store_ac_cache(ptoks + gen_ids, cache)
+    if reused:
+        print(f"[router] cache autocomplete: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
     text = "".join(out)
     for marker in ("<|endoftext|>", "<|fim_pad|>", "<|file_sep|>", "<|repo_name|>"):
         text = text.split(marker)[0]
@@ -703,6 +716,7 @@ def _loaded():
     return {
         "chat": chat,
         "autocomplete": AC_NAME if _ac["model"] is not None else None,
+        "autocomplete_cached_tokens": len(_ac["pctoks"]) if _ac.get("pctoks") else 0,
         "embed": EM_NAME if _em["model"] is not None else None,
     }
 
@@ -821,6 +835,33 @@ def _store_cache(name, all_toks, cache):
         if name in _chat:
             _chat[name]["pc"] = cache
             _chat[name]["pctoks"] = all_toks
+
+
+def _reuse_ac_cache(model, ptoks):
+    """Like _reuse_cache, but for the fixed autocomplete slot (_ac), which isn't
+    keyed by name."""
+    if PROMPT_CACHE:
+        with _reg_lock:
+            slot_c = _ac["pc"]
+            slot_t = _ac["pctoks"]
+        if slot_c is not None and slot_t and can_trim_prompt_cache(slot_c):
+            n = _common_prefix(slot_t, ptoks)
+            if n > 0:
+                extra = len(slot_t) - n
+                if extra > 0:
+                    trim_prompt_cache(slot_c, extra)
+                suffix = ptoks[n:]
+                if not suffix:
+                    trim_prompt_cache(slot_c, 1)
+                    suffix = ptoks[-1:]
+                return slot_c, suffix, n
+    return make_prompt_cache(model), ptoks, 0
+
+
+def _store_ac_cache(all_toks, cache):
+    with _reg_lock:
+        _ac["pc"] = cache
+        _ac["pctoks"] = all_toks
 
 
 # ---------------------------------------------------------------- GPU worker
@@ -950,6 +991,7 @@ def _run_unload(job):
     if target == "all":
         if _ac["model"] is not None:
             _ac["model"] = _ac["tok"] = None
+            _ac["pc"] = _ac["pctoks"] = None
             freed.append(AC_NAME)
         if _em["model"] is not None:
             _em["model"] = _em["proc"] = None
@@ -976,8 +1018,13 @@ def _run_clear(job):
             names = [n for n, m in _chat.items() if m.get("pc") is not None]
             for n in names:
                 _chat[n]["pc"] = _chat[n]["pctoks"] = None
+            ac_cleared = _ac["pc"] is not None
+            if ac_cleared:
+                _ac["pc"] = _ac["pctoks"] = None
         if names:
             cleared.append("prompt-cache: " + ", ".join(names))
+        if ac_cleared:
+            cleared.append("prompt-cache: autocomplete")
         gc.collect()
     if target in ("cache", "all"):
         mx.clear_cache()
