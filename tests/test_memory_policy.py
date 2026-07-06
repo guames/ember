@@ -104,6 +104,30 @@ def test_cache_relief_skips_models_without_cache():
     assert mp.order_cache_relief("keep", models) == ["b"]
 
 
+# ---------------------------------------------------------------- is_oom_error
+def test_is_oom_error_matches_metal_buffer_size_message():
+    msg = "[metal::malloc] Attempting to allocate 160000000000 bytes which is greater than..."
+    assert mp.is_oom_error(msg)
+
+
+def test_is_oom_error_matches_metal_resource_limit_message():
+    assert mp.is_oom_error("[metal::malloc] Resource limit (100.0 GB) exceeded.")
+
+
+def test_is_oom_error_matches_cpu_malloc_message():
+    assert mp.is_oom_error("[malloc] Unable to allocate 4294967296 bytes.")
+
+
+def test_is_oom_error_rejects_unrelated_errors():
+    assert not mp.is_oom_error("connection reset by peer")
+    assert not mp.is_oom_error("KeyError: 'qwen3-8b'")
+
+
+def test_is_oom_error_handles_empty_message():
+    assert not mp.is_oom_error("")
+    assert not mp.is_oom_error(None)
+
+
 # ---------------------------------------------------------------- scale_defaults
 def test_scale_defaults_small_ram_is_conservative():
     d = mp.scale_defaults(8.0)

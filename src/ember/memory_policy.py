@@ -109,6 +109,15 @@ def order_cache_relief(keep, models):
     return order
 
 
+def is_oom_error(msg):
+    """True when an exception message matches MLX's OOM-shaped allocator failures:
+    `[malloc] Unable to allocate ...` (CPU) or `[metal::malloc] Attempting to allocate ...`
+    / `[metal::malloc] Resource limit (...` (GPU). MLX raises these as a plain builtin
+    `RuntimeError` with no dedicated exception type, so message-sniffing is the only
+    signal available to tell an OOM apart from any other runtime failure."""
+    return bool(msg) and ("[malloc]" in msg or "[metal::malloc]" in msg)
+
+
 def common_prefix(a, b):
     """Length of the longest shared prefix of two token-id sequences."""
     n = min(len(a), len(b))

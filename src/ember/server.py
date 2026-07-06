@@ -1111,18 +1111,28 @@ def _run_chat(job):
         job.out.put(("error", msg))
         _record_metrics("chat", name, time.monotonic() - t0, error=msg)
         return
-    try:
-        model, tok, vlm = chat_model(name)
-    except Exception as e:  # noqa: BLE001
-        job.out.put(("error", str(e)))
-        _record_metrics("chat", name, time.monotonic() - t0, error=str(e))
-        return
+    meta_sent = False
+    retried_load_oom = False
+    while True:
+        try:
+            model, tok, vlm = chat_model(name)
+        except Exception as e:  # noqa: BLE001
+            if not retried_load_oom and memory_policy.is_oom_error(str(e)):
+                retried_load_oom = True
+                _enforce_memory(keep=name)  # drop caches / evict LRU, then retry once
+                continue
+            job.out.put(("error", str(e)))
+            _record_metrics("chat", name, time.monotonic() - t0, error=str(e))
+            return
+        break
     ka = _parse_ka(body.get("keep_alive"))
     if ka is not None:
         with _reg_lock:
             if name in _chat:
                 _chat[name]["ka"] = ka
-    job.out.put(("meta", name))
+    if not meta_sent:
+        job.out.put(("meta", name))
+        meta_sent = True
     if vlm:  # Phase 3: multimodal path (mlx-vlm)
         usage = _gen_vlm(job, name, model, tok, body, messages, images)
         if usage is None:
@@ -1142,96 +1152,113 @@ def _run_chat(job):
     if err:
         job.out.put(("error", err))
         return
-    cache, suffix, reused, slot_idx = _reuse_cache(name, model, ptoks)
-    seed = body.get("seed", p.get("seed"))
-    if seed is not None:  # reproducibility (temp>0)
-        mx.random.seed(int(seed))
-    stops = body.get("stop", p.get("stop"))  # stop sequences (str or list)
-    if isinstance(stops, str):
-        stops = [stops]
-    stopbuf = _StopBuf(stops) if stops else None
-    lps = _logits_processors(name, body) or []  # repetition penalties
-    rf = _response_format_processor(name, tok, body)  # constrained decoding (JSON/schema)
-    if rf is not None:
-        lps = lps + [rf]
-    last = None
-    buf = []  # with tools, buffer to parse at the end
-    gen_ids = []
-    stopped = False
-    try:
-        for r in stream_generate(
-            model,
-            tok,
-            mx.array(suffix),
-            prompt_cache=cache,
-            max_tokens=body.get("max_tokens") or 1024,
-            sampler=_sampler(name, body),
-            logits_processors=lps or None,
-            prefill_step_size=PREFILL_STEP,
-            **_kv_kwargs(),
-        ):
-            if job.cancel.is_set():
-                break
-            last = r
-            gen_ids.append(int(r.token))
-            if tools:
-                buf.append(r.text)
-                if stopbuf is not None:
-                    full = "".join(buf)
-                    cut = _StopBuf.earliest_stop(full, stopbuf.stops)
-                    if cut != -1:
-                        buf = [full[:cut]]
+    retried_gen_oom = False
+    while True:
+        cache, suffix, reused, slot_idx = _reuse_cache(name, model, ptoks)
+        seed = body.get("seed", p.get("seed"))
+        if seed is not None:  # reproducibility (temp>0)
+            mx.random.seed(int(seed))
+        stops = body.get("stop", p.get("stop"))  # stop sequences (str or list)
+        if isinstance(stops, str):
+            stops = [stops]
+        stopbuf = _StopBuf(stops) if stops else None
+        lps = _logits_processors(name, body) or []  # repetition penalties
+        rf = _response_format_processor(name, tok, body)  # constrained decoding (JSON/schema)
+        if rf is not None:
+            lps = lps + [rf]
+        last = None
+        buf = []  # with tools, buffer to parse at the end
+        gen_ids = []
+        stopped = False
+        emitted = False  # any delta already on job.out -> unsafe to retry past this point
+        try:
+            for r in stream_generate(
+                model,
+                tok,
+                mx.array(suffix),
+                prompt_cache=cache,
+                max_tokens=body.get("max_tokens") or 1024,
+                sampler=_sampler(name, body),
+                logits_processors=lps or None,
+                prefill_step_size=PREFILL_STEP,
+                **_kv_kwargs(),
+            ):
+                if job.cancel.is_set():
+                    break
+                last = r
+                gen_ids.append(int(r.token))
+                if tools:
+                    buf.append(r.text)
+                    if stopbuf is not None:
+                        full = "".join(buf)
+                        cut = _StopBuf.earliest_stop(full, stopbuf.stops)
+                        if cut != -1:
+                            buf = [full[:cut]]
+                            stopped = True
+                            break
+                elif stopbuf is not None:
+                    emit, hit = stopbuf.push(r.text)
+                    if emit:
+                        job.out.put(("delta", emit))
+                        emitted = True
+                    if hit:
                         stopped = True
                         break
-            elif stopbuf is not None:
-                emit, hit = stopbuf.push(r.text)
-                if emit:
-                    job.out.put(("delta", emit))
-                if hit:
-                    stopped = True
-                    break
-            else:
-                job.out.put(("delta", r.text))
-            _drain_short()  # let autocomplete/embed cut in front
-        if not tools and stopbuf is not None and not stopped:
-            tail = stopbuf.flush()  # drain the held-back tail (natural end)
-            if tail:
-                job.out.put(("delta", tail))
-        _store_cache(name, ptoks + gen_ids, cache, slot_idx)  # slot reflects prompt+generation
-        if reused:
-            print(f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
-        if tools:
-            calls, content = _parse_tool_calls(prefill + "".join(buf))
-            if calls:
-                job.out.put(("toolcalls", (calls, content)))
-            elif content:
-                job.out.put(("delta", content))
-        usage = {
-            "prompt_tokens": len(ptoks),
-            "completion_tokens": getattr(last, "generation_tokens", 0),
-            "cached_tokens": reused,
-        }
-        job.out.put(("done", usage))
-        _record_metrics("chat", name, time.monotonic() - t0, **usage)
-        _relieve_cache(name)  # response already sent; relieve RAM if needed
-    except Exception as e:  # noqa: BLE001
-        job.out.put(("error", str(e)))
-        _record_metrics("chat", name, time.monotonic() - t0, error=str(e))
-    finally:
-        with _reg_lock:
-            if name in _chat:
-                _chat[name]["last"] = time.monotonic()
+                else:
+                    job.out.put(("delta", r.text))
+                    emitted = True
+                _drain_short()  # let autocomplete/embed cut in front
+            if not tools and stopbuf is not None and not stopped:
+                tail = stopbuf.flush()  # drain the held-back tail (natural end)
+                if tail:
+                    job.out.put(("delta", tail))
+            _store_cache(name, ptoks + gen_ids, cache, slot_idx)  # slot reflects prompt+generation
+            if reused:
+                print(f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
+            if tools:
+                calls, content = _parse_tool_calls(prefill + "".join(buf))
+                if calls:
+                    job.out.put(("toolcalls", (calls, content)))
+                elif content:
+                    job.out.put(("delta", content))
+            usage = {
+                "prompt_tokens": len(ptoks),
+                "completion_tokens": getattr(last, "generation_tokens", 0),
+                "cached_tokens": reused,
+            }
+            job.out.put(("done", usage))
+            _record_metrics("chat", name, time.monotonic() - t0, **usage)
+            _relieve_cache(name)  # response already sent; relieve RAM if needed
+        except Exception as e:  # noqa: BLE001
+            if not emitted and not retried_gen_oom and memory_policy.is_oom_error(str(e)):
+                retried_gen_oom = True
+                _enforce_memory(keep=name)  # drop caches / evict LRU, then retry once
+                continue
+            job.out.put(("error", str(e)))
+            _record_metrics("chat", name, time.monotonic() - t0, error=str(e))
+        finally:
+            with _reg_lock:
+                if name in _chat:
+                    _chat[name]["last"] = time.monotonic()
+        break
 
 
 def _run_fim(job):
     t0 = time.monotonic()
-    try:
-        text, usage = gen_fim(job.payload["body"])
-        job.out.put(("result", (text, usage)))
-        _record_metrics("fim", AC_NAME, time.monotonic() - t0, **usage)
-    except Exception as e:  # noqa: BLE001
-        job.out.put(("error", str(e)))
-        _record_metrics("fim", AC_NAME, time.monotonic() - t0, error=str(e))
+    retried_oom = False
+    while True:
+        try:
+            text, usage = gen_fim(job.payload["body"])
+            job.out.put(("result", (text, usage)))
+            _record_metrics("fim", AC_NAME, time.monotonic() - t0, **usage)
+        except Exception as e:  # noqa: BLE001
+            if not retried_oom and memory_policy.is_oom_error(str(e)):
+                retried_oom = True
+                _enforce_memory(keep=None)  # drop caches / evict LRU, then retry once
+                continue
+            job.out.put(("error", str(e)))
+            _record_metrics("fim", AC_NAME, time.monotonic() - t0, error=str(e))
+        break
 
 
 def _run_embed(job):
@@ -1245,7 +1272,14 @@ def _run_embed(job):
         vecs = job.payload.setdefault("_vecs", [])
         while len(vecs) < len(texts):
             chunk = texts[len(vecs) : len(vecs) + EMBED_CHUNK]
-            chunk_vecs, chunk_tokens = embeddings(chunk)
+            try:
+                chunk_vecs, chunk_tokens = embeddings(chunk)
+            except Exception as e:  # noqa: BLE001
+                if not job.payload.get("_oom_retried") and memory_policy.is_oom_error(str(e)):
+                    job.payload["_oom_retried"] = True
+                    _enforce_memory(keep=None)  # drop caches / evict LRU, then retry once
+                    continue
+                raise
             vecs.extend(chunk_vecs)
             job.payload["_tokens"] = job.payload.get("_tokens", 0) + chunk_tokens
             if len(vecs) < len(texts):
