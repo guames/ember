@@ -106,9 +106,13 @@ _SCALED = memory_policy.scale_defaults(_TOTAL_GB)  # RAM-scaled defaults; envs b
 
 IDLE_TIMEOUT = float(os.environ.get("MLX_IDLE_TIMEOUT", "300"))  # s; 0/neg = never
 MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", str(_SCALED["max_runners"])))  # safety ceiling
-MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", str(_SCALED["min_free_gb"])))  # headroom to evict a model
+MIN_FREE_GB = float(
+    os.environ.get("MLX_MIN_FREE_GB", str(_SCALED["min_free_gb"]))
+)  # headroom to evict a model
 MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # floor to drop KV cache
-DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default_est_gb"])))  # size guess when unknown
+DEFAULT_EST_GB = float(
+    os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default_est_gb"]))
+)  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 EMBED_CHUNK = int(os.environ.get("MLX_EMBED_CHUNK", "8"))  # texts per embed slice
 EMBED_CACHE = os.environ.get("MLX_EMBED_CACHE", "1") not in ("0", "false", "")  # content-hash cache
@@ -122,7 +126,9 @@ KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
 KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantize from token N onward
 PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # prefill chunk (peak RAM ↓)
-WIRED_LIMIT_GB = float(os.environ.get("MLX_WIRED_LIMIT_GB", "0"))  # 0 = auto (total-headroom, RAM-scaled)
+WIRED_LIMIT_GB = float(
+    os.environ.get("MLX_WIRED_LIMIT_GB", "0")
+)  # 0 = auto (total-headroom, RAM-scaled)
 CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = MLX default (no cap)
 _DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = never expires
 API_KEY = os.environ.get("EMBER_API_KEY") or None  # unset = no auth (default, localhost-only)
@@ -130,7 +136,11 @@ SHUTDOWN_TIMEOUT = float(os.environ.get("EMBER_SHUTDOWN_TIMEOUT", "30"))  # s to
 METRICS_LOG_PATH = os.environ.get(
     "EMBER_METRICS_LOG", os.path.expanduser("~/.cache/ember/metrics.jsonl")
 )
-if METRICS_LOG_PATH in ("0", "false", ""):  # opt out of the JSONL log (the /metrics counters still work)
+if METRICS_LOG_PATH in (
+    "0",
+    "false",
+    "",
+):  # opt out of the JSONL log (the /metrics counters still work)
     METRICS_LOG_PATH = None
 
 # ---- shutdown state (set by the SIGTERM handler; read by do_POST and the worker) ----
@@ -143,7 +153,9 @@ _metrics_lock = threading.Lock()
 _metrics = {}  # (endpoint, model, status) -> aggregate dict
 
 
-def _record_metrics(endpoint, model, latency_s, prompt_tokens=0, completion_tokens=0, cached_tokens=0, error=None):
+def _record_metrics(
+    endpoint, model, latency_s, prompt_tokens=0, completion_tokens=0, cached_tokens=0, error=None
+):
     """Records one finished request: appends a JSON line to EMBER_METRICS_LOG (best-effort,
     additive to the existing print(...) logging) and updates the in-memory counters/histogram
     that GET /metrics reports from."""
@@ -210,10 +222,12 @@ def _metrics_text():
         # m["buckets"][le] is already the cumulative count of requests with latency <= le
         # (each request increments every bucket it qualifies for; see _record_metrics).
         for le in _METRICS_BUCKETS:
-            lines.append(f'ember_request_latency_seconds_bucket{{{labels},le="{le}"}} {m["buckets"][le]}')
+            lines.append(
+                f'ember_request_latency_seconds_bucket{{{labels},le="{le}"}} {m["buckets"][le]}'
+            )
         lines.append(f'ember_request_latency_seconds_bucket{{{labels},le="+Inf"}} {m["count"]}')
-        lines.append(f'ember_request_latency_seconds_sum{{{labels}}} {m["latency_sum"]:.6f}')
-        lines.append(f'ember_request_latency_seconds_count{{{labels}}} {m["count"]}')
+        lines.append(f"ember_request_latency_seconds_sum{{{labels}}} {m['latency_sum']:.6f}")
+        lines.append(f"ember_request_latency_seconds_count{{{labels}}} {m['count']}")
     for field, help_text in (
         ("prompt_tokens", "Prompt tokens processed."),
         ("completion_tokens", "Completion tokens generated."),
@@ -245,7 +259,9 @@ def _tune_memory():
     compress/page near the RAM limit -> consistent speed); cache_limit (optional) caps the
     MLX buffer pool, returning RAM to the OS."""
     try:
-        wl = WIRED_LIMIT_GB or max(4.0, _TOTAL_GB - _SCALED["wired_headroom_gb"])  # auto: leaves headroom for the OS
+        wl = WIRED_LIMIT_GB or max(
+            4.0, _TOTAL_GB - _SCALED["wired_headroom_gb"]
+        )  # auto: leaves headroom for the OS
         mx.set_wired_limit(int(wl * 1024**3))
         extra = ""
         if CACHE_LIMIT_GB > 0:
@@ -818,7 +834,9 @@ def gen_fim(body):
             break
     _store_ac_cache(ptoks + gen_ids, cache)
     if reused:
-        print(f"[router] cache autocomplete: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
+        print(
+            f"[router] cache autocomplete: reused {reused}/{len(ptoks)} prompt tokens", flush=True
+        )
     text = "".join(out)
     for marker in ("<|endoftext|>", "<|fim_pad|>", "<|file_sep|>", "<|repo_name|>"):
         text = text.split(marker)[0]
@@ -1067,7 +1085,11 @@ def _reuse_cache(name, model, ptoks):
 def _store_cache(name, all_toks, cache, slot_idx):
     with _reg_lock:
         if name in _chat:
-            _chat[name]["slots"][slot_idx] = {"pc": cache, "pctoks": all_toks, "last": time.monotonic()}
+            _chat[name]["slots"][slot_idx] = {
+                "pc": cache,
+                "pctoks": all_toks,
+                "last": time.monotonic(),
+            }
 
 
 def _reuse_ac_cache(model, ptoks):
@@ -1105,8 +1127,7 @@ def _run_chat(job):
     images = _extract_images(messages)
     if images and not CFG.get(name, {}).get("vision"):  # reject before loading
         msg = (
-            f"model '{name}' is not a vision model (config vision:true); "
-            f"got {len(images)} image(s)"
+            f"model '{name}' is not a vision model (config vision:true); got {len(images)} image(s)"
         )
         job.out.put(("error", msg))
         _record_metrics("chat", name, time.monotonic() - t0, error=msg)
@@ -1214,7 +1235,9 @@ def _run_chat(job):
                     job.out.put(("delta", tail))
             _store_cache(name, ptoks + gen_ids, cache, slot_idx)  # slot reflects prompt+generation
             if reused:
-                print(f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
+                print(
+                    f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True
+                )
             if tools:
                 calls, content = _parse_tool_calls(prefill + "".join(buf))
                 if calls:
@@ -1289,7 +1312,9 @@ def _run_embed(job):
                 except queue.Full:
                     continue  # queue momentarily full: keep going inline rather than drop it
         job.out.put(("result", (vecs, job.payload["_tokens"])))
-        _record_metrics("embed", EM_NAME, time.monotonic() - t0, prompt_tokens=job.payload["_tokens"])
+        _record_metrics(
+            "embed", EM_NAME, time.monotonic() - t0, prompt_tokens=job.payload["_tokens"]
+        )
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
         _record_metrics("embed", EM_NAME, time.monotonic() - t0, error=str(e))

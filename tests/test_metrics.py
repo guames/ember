@@ -90,7 +90,7 @@ def test_metrics_text_prometheus_shape_and_bucket_counts(clean_metrics):
     server._record_metrics("chat", "m", 5.0, prompt_tokens=2, completion_tokens=2)
     text = server._metrics_text()
     assert "# TYPE ember_requests_total counter" in text
-    assert '# TYPE ember_request_latency_seconds histogram' in text
+    assert "# TYPE ember_request_latency_seconds histogram" in text
     assert 'ember_requests_total{endpoint="chat",model="m",status="ok"} 2' in text
     assert 'ember_request_latency_seconds_count{endpoint="chat",model="m",status="ok"} 2' in text
     assert 'ember_prompt_tokens_total{endpoint="chat",model="m",status="ok"} 3' in text
@@ -108,7 +108,10 @@ def test_metrics_text_prometheus_shape_and_bucket_counts(clean_metrics):
         assert want >= prev
         assert want <= 2
         prev = want
-    assert 'ember_request_latency_seconds_bucket{endpoint="chat",model="m",status="ok",le="+Inf"} 2' in text
+    assert (
+        'ember_request_latency_seconds_bucket{endpoint="chat",model="m",status="ok",le="+Inf"} 2'
+        in text
+    )
 
 
 def test_metrics_text_empty_when_no_requests(clean_metrics):
@@ -145,7 +148,9 @@ def test_metrics_endpoint_returns_prometheus_text(live_server, clean_metrics):
         conn.close()
 
 
-def test_metrics_endpoint_unauthenticated_even_with_api_key(live_server, clean_metrics, monkeypatch):
+def test_metrics_endpoint_unauthenticated_even_with_api_key(
+    live_server, clean_metrics, monkeypatch
+):
     monkeypatch.setattr(server, "API_KEY", "secret123")
     host, port = live_server.server_address
     conn = http.client.HTTPConnection(host, port, timeout=5)

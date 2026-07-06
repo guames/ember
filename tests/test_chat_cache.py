@@ -39,7 +39,7 @@ def clean(monkeypatch):
 
     def fake_trim(cache, n):
         trims.append(n)
-        del cache[max(0, len(cache) - n):]
+        del cache[max(0, len(cache) - n) :]
         return n
 
     monkeypatch.setattr(server, "trim_prompt_cache", fake_trim)
@@ -57,7 +57,11 @@ def test_reuse_cache_miss_when_pool_empty(clean):
 
 def test_reuse_cache_partial_hit_trims_divergent_suffix(clean):
     trims = clean
-    server._chat["m"]["slots"][0] = {"pc": FakeCache(["a", "b", "c"]), "pctoks": [1, 2, 3], "last": 1.0}
+    server._chat["m"]["slots"][0] = {
+        "pc": FakeCache(["a", "b", "c"]),
+        "pctoks": [1, 2, 3],
+        "last": 1.0,
+    }
     cache, suffix, reused, slot_idx = server._reuse_cache("m", model=object(), ptoks=[1, 2, 9, 9])
     assert (reused, suffix, slot_idx) == (2, [9, 9], 0)
     assert trims == [1]
@@ -92,7 +96,11 @@ def test_reuse_cache_pool_full_no_match_evicts_lru_slot(clean):
 
 def test_reuse_cache_disabled_always_fresh(clean, monkeypatch):
     monkeypatch.setattr(server, "PROMPT_CACHE", False)
-    server._chat["m"]["slots"][0] = {"pc": FakeCache(["a", "b", "c"]), "pctoks": [1, 2, 3], "last": 1.0}
+    server._chat["m"]["slots"][0] = {
+        "pc": FakeCache(["a", "b", "c"]),
+        "pctoks": [1, 2, 3],
+        "last": 1.0,
+    }
     cache, suffix, reused, slot_idx = server._reuse_cache("m", model=object(), ptoks=[1, 2, 3])
     assert reused == 0
     assert suffix == [1, 2, 3]

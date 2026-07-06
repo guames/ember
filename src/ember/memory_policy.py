@@ -87,11 +87,26 @@ def scale_defaults(total_gb):
     picks the out-of-the-box behavior for whoever hasn't set them.
     """
     if total_gb <= 10:
-        return {"min_free_gb": 1.0, "default_est_gb": 3.0, "max_runners": 1, "wired_headroom_gb": 2.0}
+        return {
+            "min_free_gb": 1.0,
+            "default_est_gb": 3.0,
+            "max_runners": 1,
+            "wired_headroom_gb": 2.0,
+        }
     if total_gb <= 40:
-        return {"min_free_gb": 2.0, "default_est_gb": 8.0, "max_runners": 4, "wired_headroom_gb": 5.0}
+        return {
+            "min_free_gb": 2.0,
+            "default_est_gb": 8.0,
+            "max_runners": 4,
+            "wired_headroom_gb": 5.0,
+        }
     if total_gb <= 80:
-        return {"min_free_gb": 4.0, "default_est_gb": 8.0, "max_runners": 6, "wired_headroom_gb": 8.0}
+        return {
+            "min_free_gb": 4.0,
+            "default_est_gb": 8.0,
+            "max_runners": 6,
+            "wired_headroom_gb": 8.0,
+        }
     return {"min_free_gb": 8.0, "default_est_gb": 8.0, "max_runners": 8, "wired_headroom_gb": 16.0}
 
 
