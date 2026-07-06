@@ -107,3 +107,43 @@ def order_cache_relief(keep, models):
     if keep in models and models[keep].get("has_cache"):
         order.append(keep)
     return order
+
+
+def common_prefix(a, b):
+    """Length of the longest shared prefix of two token-id sequences."""
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
+
+
+def select_prompt_cache_slot(slots, ptoks):
+    """Chooses which KV-cache slot (of a runner's small pool) to reuse for an incoming
+    prompt, and which slot the post-generation cache should be written back into.
+
+    `slots` is a snapshot list of `{"tokens": [...] | None, "last": float}` — one entry
+    per pool slot, in pool order. `ptoks` is the incoming prompt's token ids.
+
+    Returns `(match_idx, common_len, write_idx)`:
+      - `match_idx` / `common_len`: the slot with the longest common prefix against
+        `ptoks` (ties broken by most-recently-used), and that prefix's length. `match_idx`
+        is `None` when no slot has any token overlap (empty pool or zero-length match).
+      - `write_idx`: where to store the cache after generation. Equal to `match_idx` on a
+        hit (overwrite in place); otherwise the first empty slot, or — when the pool is
+        full — the least-recently-used slot (evicted to make room)."""
+    best_idx, best_len = None, 0
+    for i, s in enumerate(slots):
+        toks = s.get("tokens")
+        if not toks:
+            continue
+        n = common_prefix(toks, ptoks)
+        if n > best_len or (n == best_len and n > 0 and s["last"] > slots[best_idx]["last"]):
+            best_idx, best_len = i, n
+    if best_idx is not None and best_len > 0:
+        return best_idx, best_len, best_idx
+    empty = next((i for i, s in enumerate(slots) if not s.get("tokens")), None)
+    if empty is not None:
+        return None, 0, empty
+    lru = min(range(len(slots)), key=lambda i: slots[i]["last"])
+    return None, 0, lru

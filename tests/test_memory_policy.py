@@ -141,3 +141,51 @@ def test_scale_defaults_boundaries_are_inclusive_on_lower_tier():
     assert mp.scale_defaults(10.0)["max_runners"] == 1
     assert mp.scale_defaults(40.0)["max_runners"] == 4
     assert mp.scale_defaults(80.0)["max_runners"] == 6
+
+
+# ---------------------------------------------------------------- common_prefix
+def test_common_prefix():
+    assert mp.common_prefix([1, 2, 3], [1, 2, 9]) == 2
+    assert mp.common_prefix([1, 2], [1, 2, 3]) == 2
+    assert mp.common_prefix([], [1]) == 0
+
+
+# ---------------------------------------------------------------- select_prompt_cache_slot
+def _slots(*rows):
+    """rows of (tokens_or_None, last) -> the slot-pool snapshot the planner expects."""
+    return [{"tokens": toks, "last": last} for toks, last in rows]
+
+
+def test_select_slot_empty_pool_writes_first_empty():
+    slots = _slots((None, 0.0), (None, 0.0))
+    assert mp.select_prompt_cache_slot(slots, [1, 2, 3]) == (None, 0, 0)
+
+
+def test_select_slot_picks_longest_common_prefix():
+    slots = _slots(([1, 2, 9, 9], 1.0), ([1, 2, 3, 4], 2.0))
+    # slot 1 shares a longer prefix ([1,2,3]) with the incoming prompt than slot 0 ([1,2])
+    match_idx, common_len, write_idx = mp.select_prompt_cache_slot(slots, [1, 2, 3, 9])
+    assert (match_idx, common_len, write_idx) == (1, 3, 1)
+
+
+def test_select_slot_ties_break_to_most_recently_used():
+    slots = _slots(([1, 2, 3], 1.0), ([1, 2, 3], 5.0))
+    match_idx, common_len, write_idx = mp.select_prompt_cache_slot(slots, [1, 2, 3, 9])
+    assert (match_idx, common_len, write_idx) == (1, 3, 1)
+
+
+def test_select_slot_no_overlap_uses_first_empty_when_pool_has_room():
+    slots = _slots(([9, 9, 9], 1.0), (None, 0.0))
+    assert mp.select_prompt_cache_slot(slots, [1, 2, 3]) == (None, 0, 1)
+
+
+def test_select_slot_no_overlap_and_pool_full_evicts_lru():
+    slots = _slots(([9, 9, 9], 5.0), ([8, 8, 8], 1.0))
+    match_idx, common_len, write_idx = mp.select_prompt_cache_slot(slots, [1, 2, 3])
+    assert (match_idx, common_len, write_idx) == (None, 0, 1)  # slot 1 is the LRU
+
+
+def test_select_slot_single_slot_pool_matches_old_single_slot_behavior():
+    slots = _slots(([1, 2, 3], 1.0))
+    assert mp.select_prompt_cache_slot(slots, [1, 2, 9]) == (0, 2, 0)
+    assert mp.select_prompt_cache_slot(slots, [9, 9, 9]) == (None, 0, 0)

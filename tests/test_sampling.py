@@ -1,6 +1,6 @@
 """Tests for stop sequences, keep_alive, cache prefix and multimodal payload."""
 
-from ember.server import _common_prefix, _extract_images, _normalize_messages, _parse_ka, _StopBuf
+from ember.server import _extract_images, _normalize_messages, _parse_ka, _StopBuf
 
 
 def test_stop_simple():
@@ -38,12 +38,6 @@ def test_parse_ka():
     assert _parse_ka("30s") == 30.0
     assert _parse_ka("5m") == 300.0
     assert _parse_ka("1h") == 3600.0
-
-
-def test_common_prefix():
-    assert _common_prefix([1, 2, 3], [1, 2, 9]) == 2
-    assert _common_prefix([1, 2], [1, 2, 3]) == 2
-    assert _common_prefix([], [1]) == 0
 
 
 def test_extract_images():

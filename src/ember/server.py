@@ -22,9 +22,12 @@ Ollama-style robustness (1 GPU worker + priority queue):
   - keep_alive: per-model idle-unload (env MLX_IDLE_TIMEOUT, or per-request keep_alive
     field). The next call reloads it automatically.
 
-Prompt cache (KV reuse, Ollama/llama.cpp-style): each runner keeps 1 KV cache slot;
-on every request it reuses the longest common prefix of tokens (system+history) and only
-processes the new suffix -> cuts TTFT in conversations/edits. Zero deepcopy. MLX_PROMPT_CACHE=0 turns it off.
+Prompt cache (KV reuse, Ollama/llama.cpp-style): each runner keeps a small pool of KV
+cache slots (MLX_PROMPT_CACHE_SLOTS, default 2); on every request it reuses whichever
+slot has the longest common prefix of tokens (system+history) and only processes the new
+suffix -> cuts TTFT in conversations/edits, and lets interleaved conversations on the same
+model each keep their own slot instead of evicting each other every turn. Zero deepcopy.
+MLX_PROMPT_CACHE=0 turns matching off.
 
 Under RAM pressure (free < MLX_MIN_FREE_CACHE_GB, default 1GB) the router drops the KV
 caches (LRU, oldest first) BEFORE evicting a whole model.
@@ -40,7 +43,7 @@ the prompt cache the normal prefill is already just the suffix, so it barely cos
 Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MAX_RUNNERS(auto by RAM, 4 on 24GB) MLX_MIN_FREE_GB(auto by RAM, 2.0 on 24GB)
       MLX_MIN_FREE_CACHE_GB(1.0) MLX_DEFAULT_EST_GB(auto by RAM, 8.0 on 24GB)
-      MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_KV_BITS(off) MLX_KV_GROUP_SIZE(64)
+      MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(off) MLX_KV_GROUP_SIZE(64)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off)
 
@@ -89,6 +92,7 @@ MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # flo
 DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default_est_gb"])))  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
+PROMPT_CACHE_SLOTS = max(1, int(os.environ.get("MLX_PROMPT_CACHE_SLOTS", "2")))  # KV slots/runner
 _KVB = os.environ.get("MLX_KV_BITS")  # 8/4 = quantize KV cache
 KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
@@ -172,7 +176,7 @@ def _evict(name):
         m = _chat.pop(name, None)
     if m is None:
         return
-    m["model"] = m["tok"] = m["pc"] = m["pctoks"] = None  # also frees the slot's KV cache
+    m["model"] = m["tok"] = m["slots"] = None  # also frees the pool's KV caches
     gc.collect()
     mx.clear_cache()
     print(f"[router] evict {name}", flush=True)
@@ -269,16 +273,22 @@ def _relieve_cache(keep):
         return free
     with _reg_lock:
         snap = {
-            n: {"last": m["last"], "has_cache": m.get("pc") is not None} for n, m in _chat.items()
+            n: {"last": m["last"], "has_cache": any(s["pc"] is not None for s in m["slots"])}
+            for n, m in _chat.items()
         }
     order = memory_policy.order_cache_relief(keep, snap)  # LRU first, `keep` last resort
     for n in order:
         with _reg_lock:
             e = _chat.get(n)
-            if not e or e.get("pc") is None:
+            if not e:
                 continue
-            freed = _cache_bytes(e["pc"]) / 1024**3
-            e["pc"] = e["pctoks"] = None
+            freed = 0.0
+            for s in e["slots"]:
+                if s["pc"] is not None:
+                    freed += _cache_bytes(s["pc"]) / 1024**3
+                    s["pc"] = s["pctoks"] = None
+            if freed == 0.0:
+                continue
         gc.collect()
         mx.clear_cache()
         print(
@@ -344,9 +354,8 @@ def chat_model(name):
             "last": time.monotonic(),
             "ka": _DEFAULT_KA,
             "vlm": vlm,
-            "pc": None,
-            "pctoks": None,
-        }  # prompt cache slot (KV reuse)
+            "slots": [{"pc": None, "pctoks": None, "last": 0.0} for _ in range(PROMPT_CACHE_SLOTS)],
+        }  # prompt cache pool (KV reuse, multi-slot)
     _enforce_memory(keep=name)
     return model, tok, vlm
 
@@ -717,7 +726,7 @@ def _loaded():
                 "name": n,
                 "size_gb": m["size_gb"],
                 "vision": m.get("vlm", False),
-                "cached_tokens": len(m["pctoks"]) if m.get("pctoks") else 0,
+                "cached_tokens": sum(len(s["pctoks"]) for s in m["slots"] if s["pctoks"]),
                 "idle_s": round(now - m["last"]),
                 "keep_alive_s": m["ka"],
             }
@@ -818,42 +827,37 @@ def _gen_vlm(job, name, model, proc, body, messages, images):
 
 
 # ---------------------------------------------------------------- prompt cache (KV reuse)
-def _common_prefix(a, b):
-    n = min(len(a), len(b))
-    i = 0
-    while i < n and a[i] == b[i]:
-        i += 1
-    return i
-
-
 def _reuse_cache(name, model, ptoks):
-    """KV cache reuse by longest-common-prefix (single slot per runner, Ollama/llama.cpp
-    style; zero deepcopy). Trims the divergent suffix from the slot's cache and returns
-    (cache, tokens_to_process). No match -> new cache + the whole prompt."""
-    if PROMPT_CACHE:
+    """KV cache reuse by longest-common-prefix, across a small pool of slots per runner
+    (Ollama/llama.cpp-style matching, extended to N slots; zero deepcopy). Picking which
+    slot to reuse/evict is the pure `memory_policy.select_prompt_cache_slot`; this just
+    carries out the trim on the chosen slot. Returns (cache, tokens_to_process, reused,
+    write_idx) — `write_idx` is where `_store_cache` should save the post-generation cache."""
+    with _reg_lock:
+        e = _chat.get(name)
+        slots = e["slots"] if e else []
+        snap = [{"tokens": s["pctoks"], "last": s["last"]} for s in slots]
+    match_idx, common_len, write_idx = memory_policy.select_prompt_cache_slot(snap, ptoks)
+    if PROMPT_CACHE and match_idx is not None:
         with _reg_lock:
-            e = _chat.get(name)
-            slot_c = e["pc"] if e else None
-            slot_t = e["pctoks"] if e else None
-        if slot_c is not None and slot_t and can_trim_prompt_cache(slot_c):
-            n = _common_prefix(slot_t, ptoks)
-            if n > 0:
-                extra = len(slot_t) - n  # slot tokens beyond the prefix
-                if extra > 0:
-                    trim_prompt_cache(slot_c, extra)
-                suffix = ptoks[n:]
-                if not suffix:  # prompt == the cache's prefix
-                    trim_prompt_cache(slot_c, 1)  # ensure >=1 token to generate
-                    suffix = ptoks[-1:]
-                return slot_c, suffix, n
-    return make_prompt_cache(model), ptoks, 0
+            slot = _chat[name]["slots"][match_idx]
+            slot_c, slot_t = slot["pc"], slot["pctoks"]
+        if slot_c is not None and can_trim_prompt_cache(slot_c):
+            extra = len(slot_t) - common_len  # slot tokens beyond the prefix
+            if extra > 0:
+                trim_prompt_cache(slot_c, extra)
+            suffix = ptoks[common_len:]
+            if not suffix:  # prompt == the cache's prefix
+                trim_prompt_cache(slot_c, 1)  # ensure >=1 token to generate
+                suffix = ptoks[-1:]
+            return slot_c, suffix, common_len, write_idx
+    return make_prompt_cache(model), ptoks, 0, write_idx
 
 
-def _store_cache(name, all_toks, cache):
+def _store_cache(name, all_toks, cache, slot_idx):
     with _reg_lock:
         if name in _chat:
-            _chat[name]["pc"] = cache
-            _chat[name]["pctoks"] = all_toks
+            _chat[name]["slots"][slot_idx] = {"pc": cache, "pctoks": all_toks, "last": time.monotonic()}
 
 
 def _reuse_ac_cache(model, ptoks):
@@ -864,7 +868,7 @@ def _reuse_ac_cache(model, ptoks):
             slot_c = _ac["pc"]
             slot_t = _ac["pctoks"]
         if slot_c is not None and slot_t and can_trim_prompt_cache(slot_c):
-            n = _common_prefix(slot_t, ptoks)
+            n = memory_policy.common_prefix(slot_t, ptoks)
             if n > 0:
                 extra = len(slot_t) - n
                 if extra > 0:
@@ -918,7 +922,7 @@ def _run_chat(job):
     if prefill:
         prompt += prefill
     ptoks = tok.encode(prompt, add_special_tokens=False)  # template already has the specials
-    cache, suffix, reused = _reuse_cache(name, model, ptoks)
+    cache, suffix, reused, slot_idx = _reuse_cache(name, model, ptoks)
     p = CFG.get(name, {}).get("params", {})
     seed = body.get("seed", p.get("seed"))
     if seed is not None:  # reproducibility (temp>0)
@@ -967,7 +971,7 @@ def _run_chat(job):
             tail = stopbuf.flush()  # drain the held-back tail (natural end)
             if tail:
                 job.out.put(("delta", tail))
-        _store_cache(name, ptoks + gen_ids, cache)  # slot reflects prompt+generation
+        _store_cache(name, ptoks + gen_ids, cache, slot_idx)  # slot reflects prompt+generation
         if reused:
             print(f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True)
         if tools:
@@ -1043,9 +1047,10 @@ def _run_clear(job):
     cleared = []
     if target in ("context", "all"):
         with _reg_lock:
-            names = [n for n, m in _chat.items() if m.get("pc") is not None]
+            names = [n for n, m in _chat.items() if any(s["pc"] is not None for s in m["slots"])]
             for n in names:
-                _chat[n]["pc"] = _chat[n]["pctoks"] = None
+                for s in _chat[n]["slots"]:
+                    s["pc"] = s["pctoks"] = None
             ac_cleared = _ac["pc"] is not None
             if ac_cleared:
                 _ac["pc"] = _ac["pctoks"] = None
@@ -1174,6 +1179,7 @@ class Handler(BaseHTTPRequestHandler):
                         "min_free_cache_gb": MIN_FREE_CACHE_GB,
                         "idle_timeout_s": IDLE_TIMEOUT,
                         "prompt_cache": PROMPT_CACHE,
+                        "prompt_cache_slots": PROMPT_CACHE_SLOTS,
                         "kv_bits": KV_BITS,
                         "prefill_step": PREFILL_STEP,
                     },
