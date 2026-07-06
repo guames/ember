@@ -24,6 +24,7 @@ dependencies = [
   "mlx-embeddings>=0.0.3",
   "psutil>=5.9",
   "pyyaml>=6.0",
+  "transformers<5.13",
 ]
 
 [project.optional-dependencies]
