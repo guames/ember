@@ -546,6 +546,18 @@ def _tool_prefill(tool_choice, prompt):
     return "<tool_call>\n"
 
 
+def _num_ctx_error(num_ctx, n_prompt_tokens):
+    """Checks a prompt's token count against a model's configured num_ctx (if any).
+    Returns an error message if the prompt is too long, else None. Pure/testable —
+    callers own reading the config and reporting the error."""
+    if num_ctx and n_prompt_tokens > num_ctx:
+        return (
+            f"prompt has {n_prompt_tokens} tokens, which exceeds this model's "
+            f"configured num_ctx ({num_ctx}); trim the conversation or raise num_ctx"
+        )
+    return None
+
+
 def _sampler(name, body):
     p = CFG.get(name, {}).get("params", {})
     return make_sampler(
@@ -922,8 +934,12 @@ def _run_chat(job):
     if prefill:
         prompt += prefill
     ptoks = tok.encode(prompt, add_special_tokens=False)  # template already has the specials
-    cache, suffix, reused, slot_idx = _reuse_cache(name, model, ptoks)
     p = CFG.get(name, {}).get("params", {})
+    err = _num_ctx_error(p.get("num_ctx"), len(ptoks))
+    if err:
+        job.out.put(("error", err))
+        return
+    cache, suffix, reused, slot_idx = _reuse_cache(name, model, ptoks)
     seed = body.get("seed", p.get("seed"))
     if seed is not None:  # reproducibility (temp>0)
         mx.random.seed(int(seed))
