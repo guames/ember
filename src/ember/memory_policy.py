@@ -76,6 +76,25 @@ def plan_enforce(keep, free, models, min_free_gb, max_runners):
     return victims
 
 
+def scale_defaults(total_gb):
+    """Derive memory-policy defaults from total system RAM (GB).
+
+    The historical hardcoded defaults (`min_free_gb=2.0`, `default_est_gb=8.0`,
+    `max_runners=4`, `wired_headroom_gb=5.0`) were tuned for the ~24GB Apple Silicon dev
+    machine. On an 8GB machine they're too aggressive (real OOM risk); on a 64-128GB
+    machine they leave most of the RAM unused. Bucket into small/medium/large/xlarge RAM
+    profiles instead. Envs, when set, always override these (see server.py) — this only
+    picks the out-of-the-box behavior for whoever hasn't set them.
+    """
+    if total_gb <= 10:
+        return {"min_free_gb": 1.0, "default_est_gb": 3.0, "max_runners": 1, "wired_headroom_gb": 2.0}
+    if total_gb <= 40:
+        return {"min_free_gb": 2.0, "default_est_gb": 8.0, "max_runners": 4, "wired_headroom_gb": 5.0}
+    if total_gb <= 80:
+        return {"min_free_gb": 4.0, "default_est_gb": 8.0, "max_runners": 6, "wired_headroom_gb": 8.0}
+    return {"min_free_gb": 8.0, "default_est_gb": 8.0, "max_runners": 8, "wired_headroom_gb": 16.0}
+
+
 def order_cache_relief(keep, models):
     """Order in which to drop runners' KV caches under RAM pressure: oldest (LRU) first,
     with `keep` last (the current request's cache is the last resort). Only models whose

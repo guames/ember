@@ -102,3 +102,42 @@ def test_cache_relief_lru_first_keep_last():
 def test_cache_relief_skips_models_without_cache():
     models = _cache_models(("a", False, 1.0), ("b", True, 2.0), ("keep", False, 3.0))
     assert mp.order_cache_relief("keep", models) == ["b"]
+
+
+# ---------------------------------------------------------------- scale_defaults
+def test_scale_defaults_small_ram_is_conservative():
+    d = mp.scale_defaults(8.0)
+    assert d["max_runners"] == 1
+    assert d["min_free_gb"] < 2.0
+    assert d["wired_headroom_gb"] < 5.0
+
+
+def test_scale_defaults_matches_historical_24gb_values():
+    """The dev box's 24GB defaults must not change: min_free=2.0, est=8.0, runners=4,
+    wired_headroom=5.0 (i.e. wired_limit = total-5)."""
+    d = mp.scale_defaults(24.0)
+    assert d == {
+        "min_free_gb": 2.0,
+        "default_est_gb": 8.0,
+        "max_runners": 4,
+        "wired_headroom_gb": 5.0,
+    }
+
+
+def test_scale_defaults_large_ram_uses_more_headroom_and_runners():
+    d = mp.scale_defaults(64.0)
+    assert d["max_runners"] > 4
+    assert d["min_free_gb"] > 2.0
+
+
+def test_scale_defaults_xlarge_ram_scales_further():
+    small, large = mp.scale_defaults(64.0), mp.scale_defaults(128.0)
+    assert large["max_runners"] > small["max_runners"]
+    assert large["min_free_gb"] > small["min_free_gb"]
+    assert large["wired_headroom_gb"] > small["wired_headroom_gb"]
+
+
+def test_scale_defaults_boundaries_are_inclusive_on_lower_tier():
+    assert mp.scale_defaults(10.0)["max_runners"] == 1
+    assert mp.scale_defaults(40.0)["max_runners"] == 4
+    assert mp.scale_defaults(80.0)["max_runners"] == 6

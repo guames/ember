@@ -77,17 +77,17 @@ keep-alive.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `MLX_MAX_RUNNERS` | `4` | max chat models hot at once |
-| `MLX_MIN_FREE_GB` | `2.0` | evict a model when free RAM would fall below this |
+| `MLX_MAX_RUNNERS` | auto by RAM (`4` on 24GB) | max chat models hot at once |
+| `MLX_MIN_FREE_GB` | auto by RAM (`2.0` on 24GB) | evict a model when free RAM would fall below this |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | drop KV caches when free RAM falls below this |
-| `MLX_DEFAULT_EST_GB` | `8.0` | size guess for an unknown incoming model |
+| `MLX_DEFAULT_EST_GB` | auto by RAM (`8.0` on 24GB) | size guess for an unknown incoming model |
 | `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model (`0` = never) |
 | `MLX_MAX_QUEUE` | `32` | queue depth before returning `503` |
 | `MLX_KV_BITS` | off | `8`/`4` to quantize the KV cache (~2× smaller at 8-bit) |
 | `MLX_KV_GROUP_SIZE` | `64` | KV quantization group size |
 | `MLX_KV_QUANT_START` | `0` | quantize the KV cache from token N onward |
 | `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
-| `MLX_WIRED_LIMIT_GB` | auto | wired-memory ceiling (`total − 5 GB`) |
+| `MLX_WIRED_LIMIT_GB` | auto by RAM | wired-memory ceiling (`total − headroom`; headroom scales with RAM, `5GB` on 24GB) |
 | `MLX_CACHE_LIMIT_GB` | off | cap the MLX buffer pool |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse (see [prompt-cache.md](prompt-cache.md)) |
 

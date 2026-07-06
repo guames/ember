@@ -222,15 +222,15 @@ Os comandos de gerência falam com um servidor em execução (`--url`, padrão
 | Variável | Padrão | Significado |
 |---|---|---|
 | `MLX_ROUTER_PORT` / `MLX_ROUTER_HOST` | `8000` / `127.0.0.1` | endereço de bind |
-| `MLX_MAX_RUNNERS` | `4` | máximo de modelos quentes ao mesmo tempo |
-| `MLX_MIN_FREE_GB` | `2.0` | evicta um modelo abaixo desta RAM livre |
+| `MLX_MAX_RUNNERS` | auto pela RAM (`4` em 24GB) | máximo de modelos quentes ao mesmo tempo |
+| `MLX_MIN_FREE_GB` | auto pela RAM (`2.0` em 24GB) | evicta um modelo abaixo desta RAM livre |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | dropa caches KV abaixo desta RAM livre |
 | `MLX_IDLE_TIMEOUT` | `300` | segundos de ociosidade antes de descarregar um modelo de chat |
 | `MLX_MAX_QUEUE` | `32` | profundidade da fila antes de retornar 503 |
 | `MLX_PROMPT_CACHE` | `1` | reuso de cache KV por prefixo |
 | `MLX_KV_BITS` | off | `8`/`4` para quantizar o cache KV (~2× menor em 8 bits) |
 | `MLX_PREFILL_STEP` | `512` | tamanho do bloco de prefill (menor pico de RAM) |
-| `MLX_WIRED_LIMIT_GB` | auto | teto de memória wired (RAM−5 GB) |
+| `MLX_WIRED_LIMIT_GB` | auto pela RAM | teto de memória wired (RAM − margem, a margem escala com a RAM) |
 | `EMBER_CONFIG` | — | caminho explícito para o arquivo de config dos modelos |
 
 **Guias por feature** ([`docs/`](docs/README.md)): [Tools & function-calling](docs/tools.md) ·
