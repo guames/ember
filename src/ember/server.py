@@ -38,9 +38,10 @@ limit) + chunked prefill (MLX_PREFILL_STEP, peak RAM ↓ on a cold long prompt; 
 the prompt cache the normal prefill is already just the suffix, so it barely costs anything).
 
 Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
-      MLX_MAX_RUNNERS(4) MLX_MIN_FREE_GB(2.0) MLX_MIN_FREE_CACHE_GB(1.0)
+      MLX_MAX_RUNNERS(auto by RAM, 4 on 24GB) MLX_MIN_FREE_GB(auto by RAM, 2.0 on 24GB)
+      MLX_MIN_FREE_CACHE_GB(1.0) MLX_DEFAULT_EST_GB(auto by RAM, 8.0 on 24GB)
       MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_KV_BITS(off) MLX_KV_GROUP_SIZE(64)
-      MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto)
+      MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off)
 
     ember                          # CLI (port 8000 or env MLX_ROUTER_PORT)
@@ -78,11 +79,14 @@ AC_NAME, AC_REPO = _AC["name"], _AC["mlx"]  # FIM autocomplete (pinned in RAM)
 EM_NAME, EM_REPO = _EM["name"], _EM["mlx"]  # embeddings (pinned in RAM)
 
 # ---- policy (envs) ----
+_TOTAL_GB = (psutil.virtual_memory().total / 1024**3) if psutil else 24.0
+_SCALED = memory_policy.scale_defaults(_TOTAL_GB)  # RAM-scaled defaults; envs below still win
+
 IDLE_TIMEOUT = float(os.environ.get("MLX_IDLE_TIMEOUT", "300"))  # s; 0/neg = never
-MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", "4"))  # safety ceiling
-MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", "2.0"))  # headroom to evict a model
+MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", str(_SCALED["max_runners"])))  # safety ceiling
+MIN_FREE_GB = float(os.environ.get("MLX_MIN_FREE_GB", str(_SCALED["min_free_gb"])))  # headroom to evict a model
 MIN_FREE_CACHE_GB = float(os.environ.get("MLX_MIN_FREE_CACHE_GB", "1.0"))  # floor to drop KV cache
-DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", "8.0"))  # size guess when unknown
+DEFAULT_EST_GB = float(os.environ.get("MLX_DEFAULT_EST_GB", str(_SCALED["default_est_gb"])))  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
 _KVB = os.environ.get("MLX_KV_BITS")  # 8/4 = quantize KV cache
@@ -90,7 +94,7 @@ KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
 KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantize from token N onward
 PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # prefill chunk (peak RAM ↓)
-WIRED_LIMIT_GB = float(os.environ.get("MLX_WIRED_LIMIT_GB", "0"))  # 0 = auto (total-5GB)
+WIRED_LIMIT_GB = float(os.environ.get("MLX_WIRED_LIMIT_GB", "0"))  # 0 = auto (total-headroom, RAM-scaled)
 CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = MLX default (no cap)
 _DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = never expires
 
@@ -111,8 +115,7 @@ def _tune_memory():
     compress/page near the RAM limit -> consistent speed); cache_limit (optional) caps the
     MLX buffer pool, returning RAM to the OS."""
     try:
-        total = (psutil.virtual_memory().total / 1024**3) if psutil else 24.0
-        wl = WIRED_LIMIT_GB or max(4.0, total - 5.0)  # auto: leaves ~5GB for the OS
+        wl = WIRED_LIMIT_GB or max(4.0, _TOTAL_GB - _SCALED["wired_headroom_gb"])  # auto: leaves headroom for the OS
         mx.set_wired_limit(int(wl * 1024**3))
         extra = ""
         if CACHE_LIMIT_GB > 0:

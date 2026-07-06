@@ -218,15 +218,15 @@ Management commands talk to a running server (`--url`, default `http://127.0.0.1
 | Var | Default | Meaning |
 |---|---|---|
 | `MLX_ROUTER_PORT` / `MLX_ROUTER_HOST` | `8000` / `127.0.0.1` | bind address |
-| `MLX_MAX_RUNNERS` | `4` | max models hot at once |
-| `MLX_MIN_FREE_GB` | `2.0` | evict a model below this free RAM |
+| `MLX_MAX_RUNNERS` | auto by RAM (`4` on 24GB) | max models hot at once |
+| `MLX_MIN_FREE_GB` | auto by RAM (`2.0` on 24GB) | evict a model below this free RAM |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | drop KV caches below this free RAM |
 | `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model |
 | `MLX_MAX_QUEUE` | `32` | queue depth before returning 503 |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse |
 | `MLX_KV_BITS` | off | `8`/`4` to quantize the KV cache (~2× smaller at 8-bit) |
 | `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
-| `MLX_WIRED_LIMIT_GB` | auto | wired-memory ceiling (RAM−5 GB) |
+| `MLX_WIRED_LIMIT_GB` | auto by RAM | wired-memory ceiling (RAM − headroom, headroom scales with RAM) |
 | `EMBER_CONFIG` | — | explicit path to the models config file |
 
 **Feature guides** ([`docs/`](docs/README.md)): [Tools & function-calling](docs/tools.md) ·
