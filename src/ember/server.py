@@ -608,14 +608,20 @@ class _StopBuf:
         self.acc = ""
         self.sent = 0
 
+    @staticmethod
+    def earliest_stop(text, stops):
+        """Returns the index of the earliest stop sequence in text, or -1."""
+        cut = -1
+        for s in stops:
+            j = text.find(s)
+            if j != -1 and (cut == -1 or j < cut):
+                cut = j
+        return cut
+
     def push(self, text):
         """Adds new text. Returns (text_to_emit, stopped)."""
         self.acc += text
-        cut = -1
-        for s in self.stops:
-            j = self.acc.find(s)
-            if j != -1 and (cut == -1 or j < cut):
-                cut = j
+        cut = self.earliest_stop(self.acc, self.stops)
         if cut != -1:  # stop found: cut at it
             emit = self.acc[self.sent : cut] if cut > self.sent else ""
             self.sent = len(self.acc)
@@ -973,6 +979,13 @@ def _run_chat(job):
             gen_ids.append(int(r.token))
             if tools:
                 buf.append(r.text)
+                if stopbuf is not None:
+                    full = "".join(buf)
+                    cut = _StopBuf.earliest_stop(full, stopbuf.stops)
+                    if cut != -1:
+                        buf = [full[:cut]]
+                        stopped = True
+                        break
             elif stopbuf is not None:
                 emit, hit = stopbuf.push(r.text)
                 if emit:
@@ -983,7 +996,7 @@ def _run_chat(job):
             else:
                 job.out.put(("delta", r.text))
             _drain_short()  # let autocomplete/embed cut in front
-        if stopbuf is not None and not stopped:
+        if not tools and stopbuf is not None and not stopped:
             tail = stopbuf.flush()  # drain the held-back tail (natural end)
             if tail:
                 job.out.put(("delta", tail))
@@ -1151,6 +1164,11 @@ def _watchdog():
             _submit(P_SHORT, "evict", {"names": expired})
 
 
+def _error_obj(message, err_type="internal_error", err_code=None):
+    """message -> OpenAI-shaped error object: {message, type, code}."""
+    return {"message": message, "type": err_type, "code": err_code}
+
+
 def _usage_obj(u):
     """{prompt_tokens, completion_tokens, cached_tokens} -> OpenAI-shaped usage object."""
     p, c = u["prompt_tokens"], u["completion_tokens"]
@@ -1176,6 +1194,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _error(self, code, message, err_type=None, err_code=None):
+        """OpenAI-compatible error envelope: {"error": {message, type, code}}."""
+        if err_type is None:
+            err_type = "internal_error" if code >= 500 else "invalid_request_error"
+        self._json(code, {"error": _error_obj(message, err_type, err_code)})
 
     def do_GET(self):
         path = self.path.rstrip("/")
@@ -1204,7 +1228,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path.endswith("/memory"):
             self._json(200, _mem())
         else:
-            self._json(404, {"error": "not found"})
+            self._error(404, "not found", err_code="not_found")
 
     def do_POST(self):
         path = self.path.rstrip("/")
@@ -1222,12 +1246,12 @@ class Handler(BaseHTTPRequestHandler):
             elif path.endswith("/clear"):
                 self._clear(body)
             else:
-                self._json(404, {"error": "not found"})
+                self._error(404, "not found", err_code="not_found")
         except BrokenPipeError:
             pass
         except Exception as e:  # noqa: BLE001
             try:
-                self._json(500, {"error": str(e)})
+                self._error(500, str(e))
             except Exception:
                 pass
 
@@ -1235,10 +1259,10 @@ class Handler(BaseHTTPRequestHandler):
     def _chat(self, body):
         name = body.get("model", "")
         if name not in CFG:
-            return self._json(404, {"error": f"unknown model '{name}'"})
+            return self._error(404, f"unknown model '{name}'", err_code="model_not_found")
         job = _submit(P_CHAT, "chat", {"name": name, "body": body})
         if job is None:
-            return self._json(503, {"error": "queue full (maxQueue)"})
+            return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         cid, created = "chatcmpl-" + uuid.uuid4().hex[:20], int(time.time())
         include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
         if body.get("stream"):
@@ -1249,7 +1273,7 @@ class Handler(BaseHTTPRequestHandler):
     def _stream_out(self, job, cid, created, name, include_usage):
         first, data = job.out.get()
         if first == "error":
-            return self._json(500, {"error": data})
+            return self._error(500, data)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         # SSE body has no Content-Length/chunked framing, so a keep-alive
@@ -1302,7 +1326,7 @@ class Handler(BaseHTTPRequestHandler):
                         {
                             **base,
                             "choices": [{"index": 0, "delta": {}, "finish_reason": "error"}],
-                            "error": data,
+                            "error": _error_obj(data),
                         }
                     )
                     break
@@ -1340,16 +1364,16 @@ class Handler(BaseHTTPRequestHandler):
                     },
                 )
             elif kind == "error":
-                return self._json(500, {"error": data})
+                return self._error(500, data)
 
     # ---- autocomplete FIM ----
     def _completions(self, body):
         job = _submit(P_SHORT, "fim", {"body": body})
         if job is None:
-            return self._json(503, {"error": "queue full (maxQueue)"})
+            return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         kind, data = job.out.get()
         if kind == "error":
-            return self._json(500, {"error": data})
+            return self._error(500, data)
         text, usage = data
         self._json(
             200,
@@ -1369,10 +1393,10 @@ class Handler(BaseHTTPRequestHandler):
         texts = inp if isinstance(inp, list) else [inp]
         job = _submit(P_SHORT, "embed", {"texts": texts})
         if job is None:
-            return self._json(503, {"error": "queue full (maxQueue)"})
+            return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         kind, data = job.out.get()
         if kind == "error":
-            return self._json(500, {"error": data})
+            return self._error(500, data)
         vecs, prompt_tokens = data
         self._json(
             200,
@@ -1392,7 +1416,7 @@ class Handler(BaseHTTPRequestHandler):
         before = _mem()
         job = _submit(P_SHORT, "unload", {"target": target})
         if job is None:
-            return self._json(503, {"error": "queue full (maxQueue)"})
+            return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         kind, data = job.out.get()
         freed = data if kind == "result" else []
         self._json(
@@ -1404,11 +1428,11 @@ class Handler(BaseHTTPRequestHandler):
     def _clear(self, body):
         target = body.get("target", "all")
         if target not in ("context", "cache", "all"):
-            return self._json(400, {"error": "target must be context|cache|all"})
+            return self._error(400, "target must be context|cache|all", err_code="invalid_target")
         before = _mem()
         job = _submit(P_SHORT, "clear", {"target": target})
         if job is None:
-            return self._json(503, {"error": "queue full (maxQueue)"})
+            return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         kind, data = job.out.get()
         cleared = data if kind == "result" else []
         self._json(
