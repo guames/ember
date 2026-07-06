@@ -1140,6 +1140,8 @@ def _usage_obj(u):
 
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, *a):
         pass
 
@@ -1225,6 +1227,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(500, {"error": data})
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
+        # SSE body has no Content-Length/chunked framing, so a keep-alive
+        # connection would leave the client unable to tell where the
+        # response ends -> force close for this response only.
+        self.send_header("Connection", "close")
         self.end_headers()
         base = {"id": cid, "object": "chat.completion.chunk", "created": created, "model": name}
 
