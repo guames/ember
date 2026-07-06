@@ -12,6 +12,7 @@ Operations/observability:
   • GET  /health          -> trivial 200 for process supervisors (unauthenticated)
   • GET  /status          -> hot models + memory + queue + policy
   • GET  /memory          -> MLX and system memory (in use / free)
+  • GET  /metrics         -> request counters + latency histogram (Prometheus text)
   • POST /unload {target}  -> unload ('chat' | 'all' | '<model-name>')
 
 Ollama-style robustness (1 GPU worker + priority queue):
@@ -48,12 +49,19 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
       EMBER_API_KEY(off) EMBER_SHUTDOWN_TIMEOUT(30)
+      EMBER_METRICS_LOG(~/.cache/ember/metrics.jsonl, "0" to disable)
 
 Ops: GET /health is an unauthenticated 200 for process supervisors (LaunchAgent, systemd).
      EMBER_API_KEY, when set, requires `Authorization: Bearer <key>` on /v1/* routes only
      (off by default; never required for the default localhost-only setup). SIGTERM stops
      accepting new requests, waits up to EMBER_SHUTDOWN_TIMEOUT s for the in-flight job to
      finish, then exits.
+
+Observability: every chat/fim/embed request appends a JSON line (endpoint, model, latency,
+     prompt/completion/cached tokens, status) to EMBER_METRICS_LOG — additive to the existing
+     print(...) logging, not a replacement. GET /metrics exposes the same counters/latency
+     histogram in Prometheus text format for scraping; it has no time-series memory of its
+     own (restart resets it), so long-term history lives in the JSONL log instead.
 
     ember                          # CLI (port 8000 or env MLX_ROUTER_PORT)
     python -m ember
@@ -119,10 +127,106 @@ CACHE_LIMIT_GB = float(os.environ.get("MLX_CACHE_LIMIT_GB", "0"))  # 0 = MLX def
 _DEFAULT_KA = IDLE_TIMEOUT if IDLE_TIMEOUT > 0 else -1  # -1 = never expires
 API_KEY = os.environ.get("EMBER_API_KEY") or None  # unset = no auth (default, localhost-only)
 SHUTDOWN_TIMEOUT = float(os.environ.get("EMBER_SHUTDOWN_TIMEOUT", "30"))  # s to drain on SIGTERM
+METRICS_LOG_PATH = os.environ.get(
+    "EMBER_METRICS_LOG", os.path.expanduser("~/.cache/ember/metrics.jsonl")
+)
+if METRICS_LOG_PATH in ("0", "false", ""):  # opt out of the JSONL log (the /metrics counters still work)
+    METRICS_LOG_PATH = None
 
 # ---- shutdown state (set by the SIGTERM handler; read by do_POST and the worker) ----
 _shutting_down = threading.Event()
 _worker_busy = threading.Event()
+
+# ---- metrics (issue #28): JSONL request log + in-memory /metrics (Prometheus text) ----
+_METRICS_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120)  # seconds
+_metrics_lock = threading.Lock()
+_metrics = {}  # (endpoint, model, status) -> aggregate dict
+
+
+def _record_metrics(endpoint, model, latency_s, prompt_tokens=0, completion_tokens=0, cached_tokens=0, error=None):
+    """Records one finished request: appends a JSON line to EMBER_METRICS_LOG (best-effort,
+    additive to the existing print(...) logging) and updates the in-memory counters/histogram
+    that GET /metrics reports from."""
+    status = "error" if error else "ok"
+    entry = {
+        "ts": time.time(),
+        "endpoint": endpoint,
+        "model": model,
+        "status": status,
+        "latency_ms": round(latency_s * 1000, 1),
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "cached_tokens": cached_tokens,
+    }
+    if error:
+        entry["error"] = error
+    if METRICS_LOG_PATH:
+        try:
+            os.makedirs(os.path.dirname(METRICS_LOG_PATH), exist_ok=True)
+            with open(METRICS_LOG_PATH, "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception as e:  # noqa: BLE001
+            print(f"[router] metrics log write failed (continuing): {e}", flush=True)
+    with _metrics_lock:
+        m = _metrics.setdefault(
+            (endpoint, model, status),
+            {
+                "count": 0,
+                "latency_sum": 0.0,
+                "buckets": dict.fromkeys(_METRICS_BUCKETS, 0),
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+            },
+        )
+        m["count"] += 1
+        m["latency_sum"] += latency_s
+        m["prompt_tokens"] += prompt_tokens
+        m["completion_tokens"] += completion_tokens
+        m["cached_tokens"] += cached_tokens
+        for le in _METRICS_BUCKETS:
+            if latency_s <= le:
+                m["buckets"][le] += 1
+
+
+def _metrics_text():
+    """Renders the in-memory counters as Prometheus text exposition format."""
+    with _metrics_lock:
+        snapshot = {k: {**v, "buckets": dict(v["buckets"])} for k, v in _metrics.items()}
+    lines = [
+        "# HELP ember_requests_total Total requests handled.",
+        "# TYPE ember_requests_total counter",
+    ]
+    for (endpoint, model, status), m in snapshot.items():
+        lines.append(
+            f'ember_requests_total{{endpoint="{endpoint}",model="{model}",status="{status}"}} {m["count"]}'
+        )
+    lines += [
+        "# HELP ember_request_latency_seconds Request latency in seconds.",
+        "# TYPE ember_request_latency_seconds histogram",
+    ]
+    for (endpoint, model, status), m in snapshot.items():
+        labels = f'endpoint="{endpoint}",model="{model}",status="{status}"'
+        # m["buckets"][le] is already the cumulative count of requests with latency <= le
+        # (each request increments every bucket it qualifies for; see _record_metrics).
+        for le in _METRICS_BUCKETS:
+            lines.append(f'ember_request_latency_seconds_bucket{{{labels},le="{le}"}} {m["buckets"][le]}')
+        lines.append(f'ember_request_latency_seconds_bucket{{{labels},le="+Inf"}} {m["count"]}')
+        lines.append(f'ember_request_latency_seconds_sum{{{labels}}} {m["latency_sum"]:.6f}')
+        lines.append(f'ember_request_latency_seconds_count{{{labels}}} {m["count"]}')
+    for field, help_text in (
+        ("prompt_tokens", "Prompt tokens processed."),
+        ("completion_tokens", "Completion tokens generated."),
+        ("cached_tokens", "Prompt tokens served from the KV cache."),
+    ):
+        lines += [
+            f"# HELP ember_{field}_total {help_text}",
+            f"# TYPE ember_{field}_total counter",
+        ]
+        for (endpoint, model, status), m in snapshot.items():
+            labels = f'endpoint="{endpoint}",model="{model}",status="{status}"'
+            lines.append(f"ember_{field}_total{{{labels}}} {m[field]}")
+    return "\n".join(lines) + "\n"
 
 
 def _kv_kwargs():
@@ -916,18 +1020,16 @@ def _gen_vlm(job, name, model, proc, body, messages, images):
             job.out.put(("delta", r.text))
             last = r
             _drain_short()
-        job.out.put(
-            (
-                "done",
-                {
-                    "prompt_tokens": getattr(last, "prompt_tokens", 0),
-                    "completion_tokens": getattr(last, "generation_tokens", 0),
-                    "cached_tokens": getattr(last, "cached_tokens", 0),
-                },
-            )
-        )
+        usage = {
+            "prompt_tokens": getattr(last, "prompt_tokens", 0),
+            "completion_tokens": getattr(last, "generation_tokens", 0),
+            "cached_tokens": getattr(last, "cached_tokens", 0),
+        }
+        job.out.put(("done", usage))
+        return usage
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
+        return None
     finally:
         with _reg_lock:
             if name in _chat:
@@ -997,22 +1099,23 @@ def _store_ac_cache(all_toks, cache):
 
 # ---------------------------------------------------------------- GPU worker
 def _run_chat(job):
+    t0 = time.monotonic()
     name, body = job.payload["name"], job.payload["body"]
     messages = body.get("messages", [])
     images = _extract_images(messages)
     if images and not CFG.get(name, {}).get("vision"):  # reject before loading
-        job.out.put(
-            (
-                "error",
-                f"model '{name}' is not a vision model (config vision:true); "
-                f"got {len(images)} image(s)",
-            )
+        msg = (
+            f"model '{name}' is not a vision model (config vision:true); "
+            f"got {len(images)} image(s)"
         )
+        job.out.put(("error", msg))
+        _record_metrics("chat", name, time.monotonic() - t0, error=msg)
         return
     try:
         model, tok, vlm = chat_model(name)
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
+        _record_metrics("chat", name, time.monotonic() - t0, error=str(e))
         return
     ka = _parse_ka(body.get("keep_alive"))
     if ka is not None:
@@ -1021,7 +1124,11 @@ def _run_chat(job):
                 _chat[name]["ka"] = ka
     job.out.put(("meta", name))
     if vlm:  # Phase 3: multimodal path (mlx-vlm)
-        _gen_vlm(job, name, model, tok, body, messages, images)
+        usage = _gen_vlm(job, name, model, tok, body, messages, images)
+        if usage is None:
+            _record_metrics("chat", name, time.monotonic() - t0, error="vlm generation failed")
+        else:
+            _record_metrics("chat", name, time.monotonic() - t0, **usage)
         return
     tc = body.get("tool_choice")
     tools = body.get("tools") if tc != "none" else None
@@ -1099,19 +1206,17 @@ def _run_chat(job):
                 job.out.put(("toolcalls", (calls, content)))
             elif content:
                 job.out.put(("delta", content))
-        job.out.put(
-            (
-                "done",
-                {
-                    "prompt_tokens": len(ptoks),
-                    "completion_tokens": getattr(last, "generation_tokens", 0),
-                    "cached_tokens": reused,
-                },
-            )
-        )
+        usage = {
+            "prompt_tokens": len(ptoks),
+            "completion_tokens": getattr(last, "generation_tokens", 0),
+            "cached_tokens": reused,
+        }
+        job.out.put(("done", usage))
+        _record_metrics("chat", name, time.monotonic() - t0, **usage)
         _relieve_cache(name)  # response already sent; relieve RAM if needed
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
+        _record_metrics("chat", name, time.monotonic() - t0, error=str(e))
     finally:
         with _reg_lock:
             if name in _chat:
@@ -1119,10 +1224,14 @@ def _run_chat(job):
 
 
 def _run_fim(job):
+    t0 = time.monotonic()
     try:
-        job.out.put(("result", gen_fim(job.payload["body"])))
+        text, usage = gen_fim(job.payload["body"])
+        job.out.put(("result", (text, usage)))
+        _record_metrics("fim", AC_NAME, time.monotonic() - t0, **usage)
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
+        _record_metrics("fim", AC_NAME, time.monotonic() - t0, error=str(e))
 
 
 def _run_embed(job):
@@ -1130,6 +1239,7 @@ def _run_embed(job):
     hold the single worker (and thus an in-progress chat stream) for the whole job; instead,
     after each slice it re-queues itself and returns, letting _drain_short's caller run a
     chat step in between (issue #25)."""
+    t0 = job.payload.setdefault("_t0", time.monotonic())
     try:
         texts = job.payload["texts"]
         vecs = job.payload.setdefault("_vecs", [])
@@ -1145,8 +1255,10 @@ def _run_embed(job):
                 except queue.Full:
                     continue  # queue momentarily full: keep going inline rather than drop it
         job.out.put(("result", (vecs, job.payload["_tokens"])))
+        _record_metrics("embed", EM_NAME, time.monotonic() - t0, prompt_tokens=job.payload["_tokens"])
     except Exception as e:  # noqa: BLE001
         job.out.put(("error", str(e)))
+        _record_metrics("embed", EM_NAME, time.monotonic() - t0, error=str(e))
 
 
 def _run_unload(job):
@@ -1365,6 +1477,13 @@ class Handler(BaseHTTPRequestHandler):
             )
         elif path.endswith("/memory"):
             self._json(200, _mem())
+        elif path.endswith("/metrics"):
+            data = _metrics_text().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             self._error(404, "not found", err_code="not_found")
 

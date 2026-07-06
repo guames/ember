@@ -1,8 +1,9 @@
 """Ember management CLI.
 
 `ember <command> --help` shows what each one does. The management commands (status, ps,
-memory, list, run, warm, unload) talk HTTP to an already-running server; `serve` starts the
-server; `config`/`version` are local. Only `serve` imports MLX — the rest is lightweight.
+memory, metrics, list, run, warm, unload) talk HTTP to an already-running server; `serve`
+starts the server; `config`/`version` are local. Only `serve` imports MLX — the rest is
+lightweight.
 """
 
 import argparse
@@ -44,6 +45,17 @@ def _call(url, path, method="GET", body=None):
         except Exception:  # noqa: BLE001
             err = str(e)
         sys.exit(f"error {e.code}: {err}")
+    except (urllib.error.URLError, ConnectionError, OSError):
+        sys.exit(f"Ember did not respond at {url}. Start it with `ember serve` (or set --url).")
+
+
+def _call_text(url, path):
+    """Like _call, but returns the raw response body (for the Prometheus text endpoint)."""
+    try:
+        with _request(url, path) as resp:
+            return resp.read().decode()
+    except urllib.error.HTTPError as e:
+        sys.exit(f"error {e.code}: {e.read().decode(errors='replace')}")
     except (urllib.error.URLError, ConnectionError, OSError):
         sys.exit(f"Ember did not respond at {url}. Start it with `ember serve` (or set --url).")
 
@@ -121,6 +133,10 @@ def cmd_memory(args):
         )
     if m.get("router_rss_gb") is not None:
         print(f"ember   RSS {m['router_rss_gb']:.2f}G")
+
+
+def cmd_metrics(args):
+    print(_call_text(args.url, "/metrics"), end="")
 
 
 def cmd_list(args):
@@ -239,6 +255,7 @@ def build_parser():
     add("ps", cmd_ps, "List the hot models in RAM (size, idle, keep_alive, cache).")
     add("status", cmd_status, "Full status: hot models + memory + queue + policy.")
     add("memory", cmd_memory, "Memory usage (MLX + system).")
+    add("metrics", cmd_metrics, "Request counters + latency histogram (Prometheus text).")
     add("list", cmd_list, "List the configured models and which ones are hot.")
 
     r = add("run", cmd_run, "Quick chat in the terminal (stream). Prompt via arg or stdin.")
