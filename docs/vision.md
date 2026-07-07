@@ -49,8 +49,22 @@ Ember collects image sources from each message and is flexible about the shape:
 - `type` may be `image_url`, `input_image`, or `image`.
 - the URL may be `image_url.url` (object form), or a bare string under
   `image_url` / `image` / `url`.
-- the source itself can be a remote **URL** or a **data URI**
-  (`data:image/png;base64,…`); mlx-vlm loads either.
+
+The source itself can be a **data URI** (`data:image/png;base64,…`), a remote
+**URL**, or a **local file path** — but only data URIs are accepted by default:
+
+| Source           | Default | Opt in with |
+|-------------------|:---:|---|
+| `data:image/...`  | ✅  | (always allowed) |
+| `http://`/`https://` URL | ❌ | `EMBER_ALLOW_IMAGE_URLS=1` |
+| local file path   | ❌ | `EMBER_ALLOW_IMAGE_PATHS=1` |
+
+Remote URLs and local paths are blocked by default because Ember has no way to tell a
+legitimate image request from a client using the router to probe internal network
+services (SSRF) or read arbitrary files off disk. When you do opt in, the fetch/read
+happens on the HTTP handler thread (10s timeout for URLs) — never on the GPU worker
+thread — so a slow or hanging source can't stall generation for other requests. A
+rejected or failed source returns `400` before anything is queued.
 
 Multiple images per message are supported — they're passed to the model together.
 
