@@ -25,9 +25,7 @@ def _slot(last):
 
 # ---------------------------------------------------------------- _warm_model
 def test_resolves_to_most_recently_used_chat(monkeypatch):
-    monkeypatch.setattr(
-        server, "_chat", {"a": _slot(1.0), "b": _slot(5.0), "c": _slot(3.0)}
-    )
+    monkeypatch.setattr(server, "_chat", {"a": _slot(1.0), "b": _slot(5.0), "c": _slot(3.0)})
     assert server._warm_model() == "b"
 
 
