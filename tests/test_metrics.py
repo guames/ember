@@ -5,6 +5,7 @@ _run_fim/_run_embed/_run_chat hook points are exercised with monkeypatched model
 mirroring tests/test_fim_cache.py's and tests/test_chat_cache.py's style.
 """
 
+import builtins
 import http.client
 import json
 import threading
@@ -16,9 +17,14 @@ from ember import server
 
 @pytest.fixture(autouse=True)
 def clean_metrics(monkeypatch, tmp_path):
-    """Every test gets an empty in-memory counter set and its own JSONL path."""
+    """Every test gets an empty in-memory counter set, its own JSONL path, and a fresh
+    (closed) persistent log handle -- the handle is a module global tied to whatever path
+    was open when it was created, so it must not leak across tests that swap the path."""
     monkeypatch.setattr(server, "_metrics", {})
     monkeypatch.setattr(server, "METRICS_LOG_PATH", str(tmp_path / "metrics.jsonl"))
+    monkeypatch.setattr(server, "METRICS_LOG_MAX_MB", 64.0)
+    monkeypatch.setattr(server, "METRICS_LOG_MAX_BYTES", 64 * 1024 * 1024)
+    monkeypatch.setattr(server, "_metrics_log_fh", None)
     return tmp_path
 
 
@@ -82,6 +88,84 @@ def test_record_metrics_bad_log_path_does_not_raise(clean_metrics, monkeypatch, 
     monkeypatch.setattr(server, "METRICS_LOG_PATH", "/nonexistent-root-dir/x/metrics.jsonl")
     server._record_metrics("chat", "m", 0.1)  # should not raise
     assert server._metrics[("chat", "m", "ok")]["count"] == 1
+
+
+# ---------------------------------------------------------------- log rotation (issue #57)
+def test_metrics_log_reuses_one_handle_across_writes(clean_metrics, monkeypatch):
+    """_record_metrics used to os.makedirs + open + close on every call; now it keeps one
+    handle open behind _metrics_lock and only opens once."""
+    opened = []
+    real_open = builtins.open
+
+    def spy_open(path, mode):
+        opened.append(path)
+        return real_open(path, mode)
+
+    monkeypatch.setattr(server, "open", spy_open, raising=False)
+    server._record_metrics("chat", "m", 0.1)
+    server._record_metrics("chat", "m", 0.1)
+    server._record_metrics("chat", "m", 0.1)
+    assert len(opened) == 1
+    assert len(_lines(clean_metrics / "metrics.jsonl")) == 3
+
+
+def test_metrics_log_does_not_rotate_under_cap(clean_metrics):
+    for i in range(5):
+        server._record_metrics("chat", "m", 0.1, prompt_tokens=i)
+    assert len(_lines(clean_metrics / "metrics.jsonl")) == 5
+    assert not (clean_metrics / "metrics.jsonl.1").exists()
+
+
+def test_metrics_log_rotates_past_cap_and_keeps_one_generation(clean_metrics, monkeypatch):
+    """Once a write pushes the file past METRICS_LOG_MAX_BYTES, the whole file (including
+    the line that just crossed the cap) is renamed to `.1` and the next write starts a
+    fresh file -- so disk usage stays bounded at ~2 generations, not O(requests)."""
+    monkeypatch.setattr(server, "METRICS_LOG_MAX_BYTES", 1)  # any single line already exceeds it
+    current = clean_metrics / "metrics.jsonl"
+    rotated = clean_metrics / "metrics.jsonl.1"
+
+    for i in range(3):
+        server._record_metrics("chat", "m", 0.1, prompt_tokens=i)
+        # every write immediately crosses the 1-byte cap, so it's rotated out right away
+        assert not current.exists()
+        assert len(_lines(rotated)) == 1
+        assert _lines(rotated)[0]["prompt_tokens"] == i
+
+    # only the most recent write survives in .1 -- older generations aren't kept around
+    assert _lines(rotated)[0]["prompt_tokens"] == 2
+
+
+def test_metrics_log_reopens_after_handle_error(clean_metrics, monkeypatch):
+    """If a write on the cached handle fails, the handle is dropped and the next call
+    reopens (and succeeds) instead of silently staying broken forever."""
+    real_open = builtins.open
+    state = {"n": 0}
+
+    class _BoomOnce:
+        def write(self, data):
+            state["n"] += 1
+            if state["n"] == 1:
+                raise OSError("disk full")
+
+        def flush(self):
+            pass
+
+        def tell(self):
+            return 0
+
+        def close(self):
+            pass
+
+    def spy_open(path, mode):
+        if state["n"] == 0:
+            return _BoomOnce()
+        return real_open(path, mode)
+
+    monkeypatch.setattr(server, "open", spy_open, raising=False)
+    server._record_metrics("chat", "m", 0.1)  # write fails, handle dropped
+    server._record_metrics("chat", "m", 0.1)  # reopens for real, succeeds
+    assert len(_lines(clean_metrics / "metrics.jsonl")) == 1
+    assert server._metrics[("chat", "m", "ok")]["count"] == 2  # counters unaffected either way
 
 
 # ---------------------------------------------------------------- _metrics_text
@@ -260,5 +344,51 @@ def test_run_chat_records_error_metric_for_non_vision_image(clean_metrics):
     server._run_chat(job)
     kind, data = job.out.get_nowait()
     assert kind == "error"
+    m = server._metrics[("chat", name, "error")]
+    assert m["count"] == 1
+
+
+class _FakeTok:
+    """No chat_template -> _fmt_chat falls back to a plain join; encode returns 3 fixed ids."""
+
+    def encode(self, s, add_special_tokens=False):
+        return [1, 2, 3]
+
+
+def test_run_chat_records_error_metric_for_num_ctx_rejection(clean_metrics, monkeypatch):
+    """The num_ctx-overflow rejection in _run_chat returned without ever calling
+    _record_metrics (issue #57), so context-overflow errors were invisible in /metrics and
+    the JSONL log."""
+    name = next(iter(server.CFG))
+    monkeypatch.setattr(
+        server,
+        "_chat",
+        {
+            name: {
+                "model": object(),
+                "tok": _FakeTok(),
+                "size_gb": 1.0,
+                "last": 0.0,
+                "ka": -1,
+                "vlm": False,
+                "slots": [{"pc": None, "pctoks": None, "last": 0.0}],
+            }
+        },
+    )
+    monkeypatch.setitem(server.CFG[name], "params", {"num_ctx": 2})  # _FakeTok.encode -> 3 ids
+    job = _FakeJob({"name": name, "body": {"messages": [{"role": "user", "content": "hi"}]}})
+    job.out = server.queue.Queue()
+    server._run_chat(job)
+    kinds = []
+    while not job.out.empty():
+        kind, data = job.out.get_nowait()
+        kinds.append((kind, data))
+    assert kinds[-1][0] == "error"
+    assert "num_ctx" in kinds[-1][1]
+    entries = _lines(clean_metrics / "metrics.jsonl")
+    assert len(entries) == 1
+    assert entries[0]["endpoint"] == "chat"
+    assert entries[0]["model"] == name
+    assert entries[0]["status"] == "error"
     m = server._metrics[("chat", name, "error")]
     assert m["count"] == 1
