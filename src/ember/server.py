@@ -1484,7 +1484,9 @@ def _drain_short():
         try:
             _q.put_nowait(item)
         except queue.Full:
-            _dispatch(job)
+            # Queue is saturated: fail honestly instead of dispatching this chat job inline,
+            # which would nest a full generation loop inside the caller's own token loop.
+            job.out.put(("error", "queue full (maxQueue)"))
     _q.task_done()
 
 
