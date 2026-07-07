@@ -1065,6 +1065,7 @@ def gen_fim(body):
 
 
 _EMBED_CACHE_EVICT_CHUNK_FRACTION = 10  # evict ~1/10th of rows (by last_used) once over cap
+_EMBED_CACHE_TOUCH_BATCH = 50  # flush accumulated last_used updates after this many get() hits
 
 
 class _EmbedCache:
@@ -1076,11 +1077,19 @@ class _EmbedCache:
     is a cache and not a source of truth, old-schema entries are simply re-embedded and re-cached
     under the new schema on next use. Size-capped via MLX_EMBED_CACHE_MAX_MB: a cheap
     PRAGMA-based size check runs on every put, and once over cap the oldest rows (by last_used)
-    are evicted in one shot."""
+    are evicted in one shot.
+
+    WAL journal mode + synchronous=NORMAL (issue #76): safe for a cache -- worst case on power
+    loss is losing the most recent recency updates, never the cached vectors themselves, since
+    a checkpointed WAL frame is durable. get() no longer commits (and fsyncs) on every hit: hits
+    just record a last_used timestamp in memory, flushed in one transaction every
+    _EMBED_CACHE_TOUCH_BATCH hits, on put(), or on close()."""
 
     def __init__(self, path, max_mb=None):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS embeddings_v2 "
             "(hash TEXT PRIMARY KEY, vec BLOB, last_used REAL)"
@@ -1090,6 +1099,8 @@ class _EmbedCache:
         )
         self._conn.commit()
         self._lock = threading.Lock()
+        self._pending_touches = {}  # hash -> last_used, accumulated get() hits not yet flushed
+        self._touch_count = 0
         if max_mb is None:
             max_mb = float(os.environ.get("MLX_EMBED_CACHE_MAX_MB", "512"))
         self._max_bytes = max_mb * 1024 * 1024
@@ -1101,10 +1112,11 @@ class _EmbedCache:
             ).fetchone()
             if row is None:
                 return None
-            self._conn.execute(
-                "UPDATE embeddings_v2 SET last_used = ? WHERE hash = ?", (time.time(), h)
-            )
-            self._conn.commit()
+            self._pending_touches[h] = time.time()
+            self._touch_count += 1
+            if self._touch_count >= _EMBED_CACHE_TOUCH_BATCH:
+                self._flush_touches_locked()
+                self._conn.commit()
         arr = array.array("f")
         arr.frombytes(row[0])
         return arr.tolist()
@@ -1112,12 +1124,34 @@ class _EmbedCache:
     def put(self, h, vec):
         blob = array.array("f", vec).tobytes()
         with self._lock:
+            self._flush_touches_locked()
             self._conn.execute(
                 "INSERT OR REPLACE INTO embeddings_v2 (hash, vec, last_used) VALUES (?, ?, ?)",
                 (h, blob, time.time()),
             )
             self._conn.commit()
             self._evict_if_over_cap()
+
+    def close(self):
+        """Flush any pending last_used touches before shutdown so a clean exit doesn't lose
+        recency data that's only sitting in memory."""
+        with self._lock:
+            self._flush_touches_locked()
+            self._conn.commit()
+            self._conn.close()
+
+    def _flush_touches_locked(self):
+        """Write out accumulated last_used timestamps from get() hits in one statement, instead
+        of one write-transaction (and fsync) per hit (issue #76). Caller holds self._lock and
+        commits -- this lets put()/close() fold the flush into their own transaction."""
+        if not self._pending_touches:
+            return
+        self._conn.executemany(
+            "UPDATE embeddings_v2 SET last_used = ? WHERE hash = ?",
+            [(ts, hh) for hh, ts in self._pending_touches.items()],
+        )
+        self._pending_touches.clear()
+        self._touch_count = 0
 
     def _evict_if_over_cap(self):
         page_count = self._conn.execute("PRAGMA page_count").fetchone()[0]
@@ -2432,6 +2466,8 @@ def serve(host=None, port=None):
         )
     httpd.shutdown()
     httpd.server_close()
+    if _embed_cache_singleton is not None:
+        _embed_cache_singleton.close()  # flush any pending last_used touches (issue #76)
     print("[ember] shutdown complete", flush=True)
 
 
