@@ -548,13 +548,18 @@ def _relieve_cache(keep):
 def _enforce_memory(keep):
     """RAM policy: 1) under critical pressure (<MIN_FREE_CACHE_GB) drop KV caches (LRU,
     cheap); 2) if still short (<MIN_FREE_GB or >MAX_RUNNERS) evict the LRU model (never
-    `keep`). Uses measured size as expected recovery (the OS is slow to reflect free)."""
+    `keep`). Uses measured size as expected recovery (the OS is slow to reflect free).
+    Always clears the MLX buffer pool before returning, even if there was nothing to
+    evict — callers use this as their one shot before retrying a failed allocation, and
+    a failed allocation can leave freed blocks stuck in the pool with no victim to blame."""
     _relieve_cache(keep)
     free = _free_gb()
     with _reg_lock:
         models = {n: {"last": m["last"], "size_gb": m["size_gb"]} for n, m in _chat.items()}
     for victim in memory_policy.plan_enforce(keep, free, models, MIN_FREE_GB, MAX_RUNNERS):
         _evict(victim)
+    gc.collect()
+    mx.clear_cache()
 
 
 def chat_model(name):

@@ -92,6 +92,23 @@ def test_make_room_never_evicts_target(clean, monkeypatch):
     assert "me" in server._chat
 
 
+# ---------------------------------------------------------------- unconditional clear (#56)
+def test_enforce_memory_clears_pool_even_with_nothing_to_evict(clean, monkeypatch):
+    """A retry after a failed allocation must get a clean pool even when the eviction
+    plan is empty (e.g. single hot model, nothing else to drop) — otherwise the retry
+    can fail again for the same reason the first attempt did."""
+    monkeypatch.setattr(server, "MIN_FREE_GB", 2.0)
+    monkeypatch.setattr(server, "MAX_RUNNERS", 4)
+    _put("me", 12.0, last=1.0)
+    monkeypatch.setattr(server, "_free_gb", lambda: 0.5)  # critically low, no cache to relieve
+    calls = []
+    monkeypatch.setattr(server.gc, "collect", lambda: calls.append("gc"))
+    monkeypatch.setattr(server.mx, "clear_cache", lambda: calls.append("mx"))
+    server._enforce_memory(keep="me")  # only resident is the target -> nothing to evict
+    assert clean == []  # confirms the eviction plan was indeed empty
+    assert calls == ["gc", "mx"]
+
+
 def test_estimate_prefers_measured_size(clean):
     server._sizes["m"] = 7.5
     assert server._estimate_size_gb("m") == 7.5
