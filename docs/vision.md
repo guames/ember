@@ -67,11 +67,27 @@ This keeps a stray image from silently loading a text model that would just igno
 
 ## Notes & limits
 
-- **Sampling:** the VLM path honors `max_tokens`, `temperature`, and `top_p` (from the
-  request, falling back to the model's `params`). The richer sampler/penalty options of
-  the text path don't all apply here.
+- **Sampling:** the VLM path honors `max_tokens`, `temperature`, `top_p`, `stop`, and
+  `seed` (from the request, falling back to the model's `params`). The richer
+  sampler/penalty options of the text path don't all apply here.
 - **Streaming** works (SSE deltas), the same as text chat.
 - **No prompt cache yet** for vision models — see the [Roadmap](../README.md#roadmap).
   Each turn reprocesses its prompt.
 - Combine with [structured output](response-format.md) to get schema-valid JSON
   *about* an image.
+
+### Feature parity: VLM vs. text chat
+
+| Feature                    | Text chat | VLM |
+|----------------------------|:---------:|:---:|
+| `stop` sequences           | ✅        | ✅ |
+| `seed`                     | ✅        | ✅ |
+| `top_p` / `temperature`    | ✅        | ✅ |
+| Prompt cache (KV reuse)    | ✅        | ❌ |
+| Repetition penalties       | ✅        | ❌ |
+| Quantized KV cache         | ✅        | ❌ |
+| `tools` / `tool_choice`    | ✅        | ❌ |
+| `response_format`          | ✅        | ❌ |
+
+The remaining gaps (prompt cache, repetition penalties, KV quant, tools,
+`response_format`) are open — see the [Roadmap](../README.md#roadmap).

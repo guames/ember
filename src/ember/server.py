@@ -22,7 +22,9 @@ Ollama-style robustness (1 GPU worker + priority queue):
   - multi-runner: keeps >1 chat model hot while there's >= MLX_MIN_FREE_GB of free
     RAM (and <= MLX_MAX_RUNNERS, a safety ceiling); LRU evicts the rest;
   - keep_alive: per-model idle-unload (env MLX_IDLE_TIMEOUT, or per-request keep_alive
-    field). The next call reloads it automatically.
+    field). The next call reloads it automatically. The fixed autocomplete/embed
+    slots never expire by default (today's behavior); a request-level keep_alive
+    opts a slot into the same idle-unload.
 
 Prompt cache (KV reuse, Ollama/llama.cpp-style): each runner keeps a small pool of KV
 cache slots (MLX_PROMPT_CACHE_SLOTS, default 2); on every request it reuses whichever
@@ -350,8 +352,15 @@ _chat = {}  # name -> {model, tok, size_gb, last, ka}
 _sizes = (
     _load_sizes()
 )  # name -> measured resident size_gb from a prior load (this run or persisted)
-_ac = {"model": None, "tok": None, "pc": None, "pctoks": None}  # autocomplete (fixed)
-_em = {"model": None, "proc": None}  # embed (fixed)
+_ac = {
+    "model": None,
+    "tok": None,
+    "pc": None,
+    "pctoks": None,
+    "last": 0.0,
+    "ka": -1,
+}  # autocomplete (fixed)
+_em = {"model": None, "proc": None, "last": 0.0, "ka": -1}  # embed (fixed)
 
 # ---- GPU queue (1 worker) ----
 P_SHORT, P_CHAT = 0, 1  # lower = higher priority
@@ -395,6 +404,25 @@ def _evict(name):
     gc.collect()
     mx.clear_cache()
     print(f"[router] evict {name}", flush=True)
+
+
+def _evict_ac():
+    """Unloads the fixed autocomplete slot (called only on the worker)."""
+    with _reg_lock:
+        _ac["model"] = _ac["tok"] = None
+        _ac["pc"] = _ac["pctoks"] = None
+    gc.collect()
+    mx.clear_cache()
+    print(f"[router] evict {AC_NAME}", flush=True)
+
+
+def _evict_em():
+    """Unloads the fixed embed slot (called only on the worker)."""
+    with _reg_lock:
+        _em["model"] = _em["proc"] = None
+    gc.collect()
+    mx.clear_cache()
+    print(f"[router] evict {EM_NAME}", flush=True)
 
 
 def _free_gb():
@@ -580,6 +608,8 @@ def ac_model():
     if _ac["model"] is None:
         print("[router] autocomplete: loading 1.5B FIM ...", flush=True)
         _ac["model"], _ac["tok"] = load(AC_REPO)
+    with _reg_lock:
+        _ac["last"] = time.monotonic()
     return _ac["model"], _ac["tok"]
 
 
@@ -589,6 +619,8 @@ def em_model():
 
         print("[router] embed: loading modernbert ...", flush=True)
         _em["model"], _em["proc"] = mlx_embeddings.load(EM_REPO)
+    with _reg_lock:
+        _em["last"] = time.monotonic()
     return _em["model"], _em["proc"]
 
 
@@ -898,6 +930,10 @@ def _response_format_processor(name, tok, body):
 def gen_fim(body):
     """FIM autocomplete (Qwen2.5-Coder): <|fim_prefix|>pre<|fim_suffix|>suf<|fim_middle|>."""
     model, tok = ac_model()
+    ka = _parse_ka(body.get("keep_alive"))
+    if ka is not None:
+        with _reg_lock:
+            _ac["ka"] = ka
     pre = body.get("prompt", "")
     suf = body.get("suffix", "") or ""
     prompt = f"<|fim_prefix|>{pre}<|fim_suffix|>{suf}<|fim_middle|>"
@@ -1053,11 +1089,20 @@ def _loaded():
             }
             for n, m in _chat.items()
         ]
+        ac_loaded, em_loaded = _ac["model"] is not None, _em["model"] is not None
+        ac_idle_s = round(now - _ac["last"]) if ac_loaded else None
+        ac_ka = _ac["ka"] if ac_loaded else None
+        em_idle_s = round(now - _em["last"]) if em_loaded else None
+        em_ka = _em["ka"] if em_loaded else None
     return {
         "chat": chat,
-        "autocomplete": AC_NAME if _ac["model"] is not None else None,
+        "autocomplete": AC_NAME if ac_loaded else None,
         "autocomplete_cached_tokens": len(_ac["pctoks"]) if _ac.get("pctoks") else 0,
-        "embed": EM_NAME if _em["model"] is not None else None,
+        "autocomplete_idle_s": ac_idle_s,
+        "autocomplete_keep_alive_s": ac_ka,
+        "embed": EM_NAME if em_loaded else None,
+        "embed_idle_s": em_idle_s,
+        "embed_keep_alive_s": em_ka,
     }
 
 
@@ -1106,12 +1151,21 @@ def _extract_images(messages):
 
 def _gen_vlm(job, name, model, proc, body, messages, images):
     """Multimodal generation via mlx-vlm. Streams deltas like the text path
-    (no tools). skip_special_tokens avoids leaking template tokens into the output."""
+    (no tools, no prompt cache). skip_special_tokens avoids leaking template
+    tokens into the output. stop/seed mirror the text path (issue #34)."""
     import mlx_vlm
     from mlx_vlm.prompt_utils import apply_chat_template as vlm_template
 
     p = CFG.get(name, {}).get("params", {})
+    seed = body.get("seed", p.get("seed"))
+    if seed is not None:  # reproducibility (temp>0)
+        mx.random.seed(int(seed))
+    stops = body.get("stop", p.get("stop"))  # stop sequences (str or list)
+    if isinstance(stops, str):
+        stops = [stops]
+    stopbuf = _StopBuf(stops) if stops else None
     last = None
+    stopped = False
     try:
         prompt = vlm_template(proc, model.config, messages, num_images=len(images))
         kw = {
@@ -1126,9 +1180,21 @@ def _gen_vlm(job, name, model, proc, body, messages, images):
         for r in mlx_vlm.stream_generate(model, proc, prompt, image=images or None, **kw):
             if job.cancel.is_set():
                 break
-            job.out.put(("delta", r.text))
             last = r
+            if stopbuf is not None:
+                emit, hit = stopbuf.push(r.text)
+                if emit:
+                    job.out.put(("delta", emit))
+                if hit:
+                    stopped = True
+                    break
+            else:
+                job.out.put(("delta", r.text))
             _drain_short()
+        if stopbuf is not None and not stopped:
+            tail = stopbuf.flush()  # drain the held-back tail (natural end)
+            if tail:
+                job.out.put(("delta", tail))
         usage = {
             "prompt_tokens": getattr(last, "prompt_tokens", 0),
             "completion_tokens": getattr(last, "generation_tokens", 0),
@@ -1389,6 +1455,10 @@ def _run_embed(job):
     if job.cancel.is_set():
         return
     t0 = job.payload.setdefault("_t0", time.monotonic())
+    ka = _parse_ka(job.payload.get("keep_alive"))
+    if ka is not None:
+        with _reg_lock:
+            _em["ka"] = ka
     try:
         texts = job.payload["texts"]
         vecs = job.payload.setdefault("_vecs", [])
@@ -1428,11 +1498,10 @@ def _run_unload(job):
             freed.append(n)
     if target == "all":
         if _ac["model"] is not None:
-            _ac["model"] = _ac["tok"] = None
-            _ac["pc"] = _ac["pctoks"] = None
+            _evict_ac()
             freed.append(AC_NAME)
         if _em["model"] is not None:
-            _em["model"] = _em["proc"] = None
+            _evict_em()
             freed.append(EM_NAME)
     if target not in ("chat", "all") and target in _chat:
         _evict(target)
@@ -1481,10 +1550,28 @@ def _run_evict(job):
             for n in job.payload["names"]
             if n in _chat and _chat[n]["ka"] >= 0 and now - _chat[n]["last"] > _chat[n]["ka"]
         ]
+        ac_due = (
+            job.payload.get("ac")
+            and _ac["model"] is not None
+            and _ac["ka"] >= 0
+            and now - _ac["last"] > _ac["ka"]
+        )
+        em_due = (
+            job.payload.get("em")
+            and _em["model"] is not None
+            and _em["ka"] >= 0
+            and now - _em["last"] > _em["ka"]
+        )
     for n in due:
         print(f"[router] idle: {n} exceeded keep_alive", flush=True)
         _evict(n)
-    if due:
+    if ac_due:
+        print(f"[router] idle: {AC_NAME} exceeded keep_alive", flush=True)
+        _evict_ac()
+    if em_due:
+        print(f"[router] idle: {EM_NAME} exceeded keep_alive", flush=True)
+        _evict_em()
+    if due or ac_due or em_due:
         mx.reset_peak_memory()
 
 
@@ -1551,8 +1638,14 @@ def _watchdog():
         now = time.monotonic()
         with _reg_lock:
             expired = [n for n, m in _chat.items() if m["ka"] >= 0 and now - m["last"] > m["ka"]]
-        if expired:
-            _submit(P_SHORT, "evict", {"names": expired})
+            ac_expired = (
+                _ac["model"] is not None and _ac["ka"] >= 0 and now - _ac["last"] > _ac["ka"]
+            )
+            em_expired = (
+                _em["model"] is not None and _em["ka"] >= 0 and now - _em["last"] > _em["ka"]
+            )
+        if expired or ac_expired or em_expired:
+            _submit(P_SHORT, "evict", {"names": expired, "ac": ac_expired, "em": em_expired})
 
 
 def _error_obj(message, err_type="internal_error", err_code=None):
@@ -1862,7 +1955,7 @@ class Handler(BaseHTTPRequestHandler):
     def _embeddings(self, body):
         inp = body.get("input", "")
         texts = inp if isinstance(inp, list) else [inp]
-        job = _submit(P_SHORT, "embed", {"texts": texts})
+        job = _submit(P_SHORT, "embed", {"texts": texts, "keep_alive": body.get("keep_alive")})
         if job is None:
             return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         kind, data = self._wait_out(job)
