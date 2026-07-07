@@ -179,13 +179,14 @@ def test_scale_defaults_small_ram_is_conservative():
 
 def test_scale_defaults_matches_historical_24gb_values():
     """The dev box's 24GB defaults must not change: min_free=2.0, est=8.0, runners=4,
-    wired_headroom=5.0 (i.e. wired_limit = total-5)."""
+    wired_headroom=5.0 (i.e. wired_limit = total-5), prefill_step=1024 (issue #81)."""
     d = mp.scale_defaults(24.0)
     assert d == {
         "min_free_gb": 2.0,
         "default_est_gb": 8.0,
         "max_runners": 4,
         "wired_headroom_gb": 5.0,
+        "prefill_step": 1024,
     }
 
 
@@ -206,6 +207,20 @@ def test_scale_defaults_boundaries_are_inclusive_on_lower_tier():
     assert mp.scale_defaults(10.0)["max_runners"] == 1
     assert mp.scale_defaults(40.0)["max_runners"] == 4
     assert mp.scale_defaults(80.0)["max_runners"] == 6
+
+
+def test_scale_defaults_prefill_step_scales_with_ram_like_the_other_knobs():
+    """Issue #81: MLX_PREFILL_STEP used to be a flat 512 regardless of machine size.
+    It should scale up with RAM the same way the other memory-policy knobs do, keeping
+    the small-machine value conservative (OOM safety) and the historical 24GB dev-box
+    default doubled (peak-RAM/speed tradeoff, per the issue's proposed buckets)."""
+    assert mp.scale_defaults(8.0)["prefill_step"] == 512
+    assert mp.scale_defaults(24.0)["prefill_step"] == 1024
+    assert mp.scale_defaults(64.0)["prefill_step"] == 2048
+    assert mp.scale_defaults(128.0)["prefill_step"] == 4096
+    # monotonically non-decreasing across tiers
+    steps = [mp.scale_defaults(g)["prefill_step"] for g in (8.0, 24.0, 64.0, 128.0)]
+    assert steps == sorted(steps)
 
 
 # ---------------------------------------------------------------- common_prefix

@@ -42,13 +42,14 @@ Compatible with the prompt cache (the QuantizedKVCache is trimmable).
 
 Memory tuning at boot: wired_limit (resident weights, no OS compression near the
 limit) + chunked prefill (MLX_PREFILL_STEP, peak RAM ↓ on a cold long prompt; with
-the prompt cache the normal prefill is already just the suffix, so it barely costs anything).
+the prompt cache the normal prefill is already just the suffix, so it barely costs
+anything). Both are RAM-scaled defaults (see memory_policy.scale_defaults).
 
 Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MAX_RUNNERS(auto by RAM, 4 on 24GB) MLX_MIN_FREE_GB(auto by RAM, 2.0 on 24GB)
       MLX_MIN_FREE_CACHE_GB(1.0) MLX_DEFAULT_EST_GB(auto by RAM, 8.0 on 24GB)
       MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(8) MLX_KV_GROUP_SIZE(64)
-      MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
+      MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(auto by RAM, 1024 on 24GB) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
       MLX_EMBED_CACHE_MAX_MB(512)
       EMBER_API_KEY(off) EMBER_SHUTDOWN_TIMEOUT(30)
@@ -135,7 +136,9 @@ _KVB = os.environ.get("MLX_KV_BITS", "8")  # 8/4 = quantize KV cache; 0 = fp16
 KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
 KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantize from token N onward
-PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # prefill chunk (peak RAM ↓)
+PREFILL_STEP = int(
+    os.environ.get("MLX_PREFILL_STEP", str(_SCALED["prefill_step"]))
+)  # prefill chunk (peak RAM ↓), RAM-scaled
 WIRED_LIMIT_GB = float(
     os.environ.get("MLX_WIRED_LIMIT_GB", "0")
 )  # 0 = auto (total-headroom, RAM-scaled)
