@@ -12,6 +12,7 @@ import queue
 import types
 
 import mlx_embeddings
+import pytest
 
 from ember import server
 
@@ -270,3 +271,30 @@ def test_drain_short_fails_chat_job_when_put_back_races_full(monkeypatch):
     kind, data = job.out.get_nowait()
     assert kind == "error"
     assert data == "queue full (maxQueue)"
+
+
+def test_drain_short_empty_queue_is_a_noop(monkeypatch):
+    """Issue #79: the overwhelmingly common call to _drain_short (called once per generated
+    token) finds an empty queue. It must return without ever calling _q.get_nowait() -- that's
+    the queue.Empty exception this guard exists to avoid raising on every token."""
+    assert server._q.empty()
+
+    def _boom():
+        raise AssertionError("get_nowait() should not be called when the queue is empty")
+
+    monkeypatch.setattr(server._q, "get_nowait", _boom)
+    monkeypatch.setattr(server, "_dispatch", lambda job: pytest.fail("must not dispatch"))
+
+    server._drain_short()  # must not raise, must not touch get_nowait/_dispatch
+
+
+def test_drain_short_still_works_when_queue_non_empty(monkeypatch):
+    """The empty-queue fast path in _drain_short must not break the normal (non-empty) path."""
+    ran = []
+    monkeypatch.setattr(server, "_dispatch", lambda job: ran.append(job))
+    server._q.put_nowait((server.P_SHORT, next(server._seq), "job-x"))
+
+    server._drain_short()
+
+    assert ran == ["job-x"]
+    assert server._q.empty()

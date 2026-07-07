@@ -381,6 +381,8 @@ P_SHORT, P_CHAT = 0, 1  # lower = higher priority
 _q = queue.PriorityQueue(maxsize=MAX_QUEUE)
 _seq = itertools.count()
 JOB_WAIT_POLL_S = 0.5  # how often a handler blocked on job.out re-checks the client (issue #31)
+SSE_COALESCE_S = 0.02  # batch fast per-token SSE deltas into one write+flush (issue #79)
+SSE_COALESCE_CHARS = 256  # ...or flush sooner once this much text has piled up
 
 
 class Job:
@@ -1757,6 +1759,8 @@ def _drain_short():
     """Runs at most one queued high-priority (short) job, then returns. Only one job (or, for
     a chunked embed job, one slice of it — see _run_embed) runs per call, so a large job can't
     monopolize the worker: control returns to the chat generation loop between calls."""
+    if _q.empty():  # overwhelmingly common case (issue #79): skip get_nowait's exception path
+        return
     try:
         item = _q.get_nowait()
     except queue.Empty:
@@ -2110,17 +2114,45 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: " + json.dumps(o).encode() + b"\n\n")
             self.wfile.flush()
 
+        # Coalesce per-token "delta" events: at 80-150+ tok/s a write()+flush() (plus a
+        # json.dumps) per token is measurable overhead and floods the socket with tiny TCP
+        # segments (issue #79). Buffer delta text and flush it every ~SSE_COALESCE_S or once
+        # SSE_COALESCE_CHARS has piled up, whichever comes first -- this only changes how often
+        # we write to the wire; job.out still gets a put per token upstream, so cancellation
+        # granularity is unaffected. tool-call/done/error events are never delayed: any buffered
+        # text is flushed ahead of them so ordering is preserved.
+        buf = []
+        buf_len = 0
+        last_flush = time.monotonic()
+
+        def flush_buf():
+            nonlocal buf, buf_len, last_flush
+            if buf:
+                send({**base, "choices": [{"index": 0, "delta": {"content": "".join(buf)}}]})
+                buf = []
+                buf_len = 0
+            last_flush = time.monotonic()
+
         finish = "stop"
         try:
             send({**base, "choices": [{"index": 0, "delta": {"role": "assistant"}}]})
             while True:
                 kind, data = self._wait_out(job)
                 if kind is None:  # client gone mid-stream, no one left to send [DONE] to
+                    flush_buf()  # best-effort: don't silently swallow content already produced
                     return
                 if kind == "delta":
                     if data:
-                        send({**base, "choices": [{"index": 0, "delta": {"content": data}}]})
-                elif kind == "toolcalls":
+                        buf.append(data)
+                        buf_len += len(data)
+                        if (
+                            buf_len >= SSE_COALESCE_CHARS
+                            or (time.monotonic() - last_flush) >= SSE_COALESCE_S
+                        ):
+                            flush_buf()
+                    continue
+                flush_buf()  # tool-call/done/error must never wait behind buffered text
+                if kind == "toolcalls":
                     calls, content = data
                     if content:
                         send({**base, "choices": [{"index": 0, "delta": {"content": content}}]})
