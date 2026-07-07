@@ -1,0 +1,32 @@
+# Ember model preset — 16 GB Macs (e.g. M-series MacBook Air/Pro, base config).
+#
+# 16 GB sits in Ember's "10-40 GB" RAM profile (docs/memory.md#ram-profiles-auto-defaults):
+# MLX_MAX_RUNNERS=4, 2 GB min free, 5 GB wired headroom. Enough to comfortably run one
+# light chat model hot, plus the pinned autocomplete + embed models, with real headroom
+# left over for context.
+#
+# Numbers below are from docs/benchmarks.md, measured on the project's reference machine
+# (Apple M5, 24 GB unified memory) — tok/s will differ on your chip, but resident RAM and
+# the relative ranking carry over.
+#
+# Copy this file to `ember.yaml` (or point EMBER_CONFIG at it) and edit as needed.
+
+models:
+  # --- light general/code chat: ~5 GB resident, 28 tok/s on the M5 reference machine ---
+  - name: qwen3-8b
+    mlx: mlx-community/Qwen3-8B-4bit
+    params: { temperature: 0.0, top_p: 0.95, num_ctx: 16384 }
+
+# Pinned (always hot, don't compete with the chat runner slot above).
+autocomplete:
+  name: autocomplete
+  mlx: mlx-community/Qwen2.5-Coder-1.5B-4bit       # FIM-capable base model, ~1 GB resident
+
+embed:
+  name: embed
+  mlx: mlx-community/nomicai-modernbert-embed-base-4bit   # well under 1 GB resident
+
+# Total resident with everything hot: ~6.5 GB, leaving several GB free for context/KV
+# cache and the OS. Want more speed over quality instead? Swap qwen3-8b's mlx: for
+# mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit (~1 GB resident, ~110 tok/s) — see
+# docs/benchmarks.md for the full table.
