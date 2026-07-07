@@ -135,6 +135,15 @@ def scale_defaults(total_gb):
     machine they leave most of the RAM unused. Bucket into small/medium/large/xlarge RAM
     profiles instead. Envs, when set, always override these (see server.py) — this only
     picks the out-of-the-box behavior for whoever hasn't set them.
+
+    `prefill_step` (issue #81) got the same treatment: it used to be a flat 512
+    regardless of machine size. Chunked prefill trades peak RAM for cold-prompt prefill
+    speed (a bigger step means fewer chunks, so faster, but a higher transient peak) — a
+    512-token step sized for an 8GB machine's OOM safety leaves prefill throughput on the
+    table on a 64-128GB machine. With the prompt cache hot, prefill is usually just the
+    new suffix, so this mostly matters for cold first turns and cache-relief
+    reprocessing. The bucket values below are taken as-proposed from issue #81 (not
+    independently re-benched — see the PR for why).
     """
     if total_gb <= 10:
         return {
@@ -142,6 +151,7 @@ def scale_defaults(total_gb):
             "default_est_gb": 3.0,
             "max_runners": 1,
             "wired_headroom_gb": 2.0,
+            "prefill_step": 512,
         }
     if total_gb <= 40:
         return {
@@ -149,6 +159,7 @@ def scale_defaults(total_gb):
             "default_est_gb": 8.0,
             "max_runners": 4,
             "wired_headroom_gb": 5.0,
+            "prefill_step": 1024,
         }
     if total_gb <= 80:
         return {
@@ -156,8 +167,15 @@ def scale_defaults(total_gb):
             "default_est_gb": 8.0,
             "max_runners": 6,
             "wired_headroom_gb": 8.0,
+            "prefill_step": 2048,
         }
-    return {"min_free_gb": 8.0, "default_est_gb": 8.0, "max_runners": 8, "wired_headroom_gb": 16.0}
+    return {
+        "min_free_gb": 8.0,
+        "default_est_gb": 8.0,
+        "max_runners": 8,
+        "wired_headroom_gb": 16.0,
+        "prefill_step": 4096,
+    }
 
 
 def order_cache_relief(keep, models):

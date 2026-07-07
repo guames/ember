@@ -107,12 +107,12 @@ Ember picks its out-of-the-box memory defaults from your Mac's **total RAM**
 (`memory_policy.scale_defaults`), so the same install behaves sensibly on an 8 GB Air and
 a 128 GB Studio. Setting the corresponding env var always overrides the profile.
 
-| Total RAM | `MLX_MAX_RUNNERS` | `MLX_MIN_FREE_GB` | `MLX_DEFAULT_EST_GB` | wired headroom |
-|---|--:|--:|--:|--:|
-| ≤ 10 GB | 1 | 1.0 | 3.0 | 2 GB |
-| 10–40 GB | 4 | 2.0 | 8.0 | 5 GB |
-| 40–80 GB | 6 | 4.0 | 8.0 | 8 GB |
-| > 80 GB | 8 | 8.0 | 8.0 | 16 GB |
+| Total RAM | `MLX_MAX_RUNNERS` | `MLX_MIN_FREE_GB` | `MLX_DEFAULT_EST_GB` | wired headroom | `MLX_PREFILL_STEP` |
+|---|--:|--:|--:|--:|--:|
+| ≤ 10 GB | 1 | 1.0 | 3.0 | 2 GB | 512 |
+| 10–40 GB | 4 | 2.0 | 8.0 | 5 GB | 1024 |
+| 40–80 GB | 6 | 4.0 | 8.0 | 8 GB | 2048 |
+| > 80 GB | 8 | 8.0 | 8.0 | 16 GB | 4096 |
 
 ("Wired headroom" is what `MLX_WIRED_LIMIT_GB` leaves for the OS: the auto ceiling is
 `total − headroom`.)
@@ -127,9 +127,12 @@ please report it in [#84](https://github.com/guames/ember/issues/84).
   near the RAM limit (which would make speed erratic). Auto by default — `total −
   headroom`, where the headroom comes from your [RAM profile](#ram-profiles-auto-defaults)
   — or set `MLX_WIRED_LIMIT_GB` explicitly.
-- **Chunked prefill** (`MLX_PREFILL_STEP`, default 512) processes a cold prompt in chunks
-  to lower peak RAM. With the prompt cache, normal prefill is already just the new suffix,
-  so this mostly matters for the first long prompt.
+- **Chunked prefill** (`MLX_PREFILL_STEP`, auto by [RAM profile](#ram-profiles-auto-defaults),
+  512 on the smallest tier) processes a cold prompt in chunks to lower peak RAM — a bigger
+  step means fewer chunks (faster prefill) at the cost of a higher transient peak, so the
+  default scales up with headroom the same way the other RAM-profile knobs do (issue #81).
+  With the prompt cache, normal prefill is already just the new suffix, so this mostly
+  matters for the first long prompt (or cache-relief reprocessing).
 - **Cache limit** (`MLX_CACHE_LIMIT_GB`) optionally caps MLX's buffer pool, returning RAM
   to the OS. Off by default.
 
@@ -146,7 +149,7 @@ please report it in [#84](https://github.com/guames/ember/issues/84).
 | `MLX_KV_BITS` | `8` | KV cache quantization bits; `4` for more aggressive, `0` for fp16 |
 | `MLX_KV_GROUP_SIZE` | `64` | KV quantization group size |
 | `MLX_KV_QUANT_START` | `0` | quantize the KV cache from token N onward |
-| `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
+| `MLX_PREFILL_STEP` | auto by [RAM profile](#ram-profiles-auto-defaults) | prefill chunk size (lower peak RAM) |
 | `MLX_WIRED_LIMIT_GB` | auto by [RAM profile](#ram-profiles-auto-defaults) | wired-memory ceiling (`total − headroom`) |
 | `MLX_CACHE_LIMIT_GB` | off | cap the MLX buffer pool |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse (see [prompt-cache.md](prompt-cache.md)) |

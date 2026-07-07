@@ -260,7 +260,7 @@ and a latency histogram, reset on restart.
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse |
 | `MLX_PROMPT_CACHE_SLOTS` | `2` | KV-cache slots per runner (interleaved conversations) |
 | `MLX_KV_BITS` | off | `8`/`4` to quantize the KV cache (~2× smaller at 8-bit) |
-| `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
+| `MLX_PREFILL_STEP` | auto by [RAM profile](docs/memory.md#ram-profiles-auto-defaults) | prefill chunk size (lower peak RAM) |
 | `MLX_WIRED_LIMIT_GB` | auto by RAM | wired-memory ceiling (RAM − headroom, headroom scales with RAM) |
 | `EMBER_CONFIG` | — | explicit path to the models config file |
 
