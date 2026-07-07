@@ -93,13 +93,60 @@ def test_health_stays_open_even_with_api_key_set(live_server, api_key):
         conn.close()
 
 
-def test_non_v1_routes_ignore_api_key(live_server, api_key):
-    """/status, /memory aren't under /v1 -- issue #27 scopes auth to /v1/* only."""
+def test_info_routes_require_bearer_token_when_api_key_set(live_server, api_key):
+    """/status, /memory, /metrics leak model names/memory/traffic -- issue #52 widens
+    auth to cover them, not just /v1/*."""
     host, port = live_server.server_address
     conn = http.client.HTTPConnection(host, port, timeout=5)
     try:
-        status, _ = _get(conn, "/status")
-        assert status == 200
+        for path in ("/status", "/memory", "/metrics"):
+            status, body = _get(conn, path)
+            assert status == 401, path
+            assert b"invalid_api_key" in body
+
+            status, _ = _get(conn, path, {"Authorization": f"Bearer {api_key}"})
+            assert status == 200, path
+    finally:
+        conn.close()
+
+
+def test_info_routes_unauthenticated_by_default(live_server):
+    assert server.API_KEY is None
+    host, port = live_server.server_address
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        for path in ("/status", "/memory", "/metrics"):
+            status, _ = _get(conn, path)
+            assert status == 200, path
+    finally:
+        conn.close()
+
+
+def test_unload_and_clear_require_bearer_token_when_api_key_set(live_server, api_key):
+    """POST /unload and /clear are state-mutating (evict every model / drop KV caches)
+    and must not be reachable without the key once one is set (issue #52). Needs the
+    queue worker running -- unlike the auth-only checks above, the authorized branch
+    goes all the way through job dispatch."""
+    threading.Thread(target=server._worker, daemon=True).start()
+    host, port = live_server.server_address
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    try:
+        for path in ("/unload", "/clear"):
+            conn.request("POST", path, body=b"{}")
+            r = conn.getresponse()
+            body = r.read()
+            assert r.status == 401, path
+            assert b"invalid_api_key" in body
+
+            conn.request(
+                "POST",
+                path,
+                body=b"{}",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+            r = conn.getresponse()
+            r.read()
+            assert r.status == 200, path
     finally:
         conn.close()
 

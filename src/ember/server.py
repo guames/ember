@@ -52,10 +52,10 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       EMBER_METRICS_LOG(~/.cache/ember/metrics.jsonl, "0" to disable)
 
 Ops: GET /health is an unauthenticated 200 for process supervisors (LaunchAgent, systemd).
-     EMBER_API_KEY, when set, requires `Authorization: Bearer <key>` on /v1/* routes only
-     (off by default; never required for the default localhost-only setup). SIGTERM stops
-     accepting new requests, waits up to EMBER_SHUTDOWN_TIMEOUT s for the in-flight job to
-     finish, then exits.
+     EMBER_API_KEY, when set, requires `Authorization: Bearer <key>` on every other route
+     (/v1/*, /status, /memory, /metrics, /unload, /clear) -- off by default; never required
+     for the default localhost-only setup. SIGTERM stops accepting new requests, waits up to
+     EMBER_SHUTDOWN_TIMEOUT s for the in-flight job to finish, then exits.
 
 Observability: every chat/fim/embed request appends a JSON line (endpoint, model, latency,
      prompt/completion/cached tokens, status) to EMBER_METRICS_LOG — additive to the existing
@@ -1506,7 +1506,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _authorized(self):
         """True if EMBER_API_KEY is unset (auth off, default) or the request carries a
-        matching `Authorization: Bearer <key>` header."""
+        matching `Authorization: Bearer <key>` header. Every route is guarded except
+        /health (process supervisors need it key-free)."""
         if not API_KEY:
             return True
         return self.headers.get("Authorization") == f"Bearer {API_KEY}"
@@ -1552,7 +1553,7 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
         if path.endswith("/health"):
             return self._json(200, {"status": "ok"})
-        if path.startswith("/v1") and not self._authorized():
+        if not self._authorized():
             return self._reject_unauthorized()
         if path.endswith("/v1/models"):
             ids = list(CFG) + [AC_NAME, EM_NAME]
@@ -1592,8 +1593,6 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
         if _shutting_down.is_set():
             return self._error(503, "server is shutting down", err_code="shutting_down")
-        if path.startswith("/v1") and not self._authorized():
-            return self._reject_unauthorized()
         length = int(self.headers.get("Content-Length", 0))
         if length > MAX_BODY_BYTES:
             return self._error(
@@ -1605,6 +1604,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
         except ValueError:
             return self._error(400, "invalid JSON in request body", err_code="invalid_json")
+        # Auth check comes after the body is drained (not before): rejecting first would
+        # leave the client's body bytes unread on the socket, which under keep-alive
+        # corrupts the framing of whatever request comes next on the same connection.
+        if not self._authorized():
+            return self._reject_unauthorized()
         try:
             if path.endswith("/chat/completions"):
                 self._chat(body)
