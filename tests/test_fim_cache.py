@@ -77,3 +77,29 @@ def test_store_ac_cache_writes_slot(clean):
     server._store_ac_cache([1, 2, 3], fake)
     assert server._ac["pc"] is fake
     assert server._ac["pctoks"] == [1, 2, 3]
+
+
+def test_gen_fim_stops_on_marker_split_across_tokens(clean, monkeypatch):
+    """The windowed scanner (issue #54) must still catch a marker that arrives
+    split across multiple stream_generate tokens, and must stop consuming
+    further tokens instead of rescanning/rebuilding the full text each time."""
+    fake_tok = type(
+        "FakeTok", (), {"encode": lambda self, s, add_special_tokens=False: [1, 2, 3]}
+    )()
+    monkeypatch.setattr(server, "ac_model", lambda: (object(), fake_tok))
+
+    class R:
+        def __init__(self, text, token):
+            self.text = text
+            self.token = token
+
+    pieces = ["hel", "lo ", "<", "|", "endoftext", "|>", "SHOULD NOT APPEAR"]
+
+    def fake_stream_generate(model, tok, arr, **kw):
+        for i, p in enumerate(pieces):
+            yield R(p, i)
+
+    monkeypatch.setattr(server, "stream_generate", fake_stream_generate)
+    text, usage = server.gen_fim({"prompt": "x", "suffix": "y"})
+    assert "SHOULD NOT APPEAR" not in text
+    assert usage["completion_tokens"] < len(pieces)

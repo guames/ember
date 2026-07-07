@@ -32,6 +32,44 @@ def test_stop_absent_flush_returns_tail():
     assert e + b.flush() == "normal text"
 
 
+def test_stop_split_across_many_short_tokens():
+    """A match whose start falls inside the windowed region (not just the very
+    last token) must still be caught — regression for the windowed scan
+    (issue #54): the window covers `hold` chars back from `checked`, not just
+    the newest push."""
+    b = _StopBuf(["STOP"])
+    out, hit = "", False
+    for tok in ["a", "b", "c", "S", "T", "O", "P", "d"]:
+        e, h = b.push(tok)
+        out += e
+        if h:
+            hit = True
+            break
+    assert hit
+    assert out == "abc"
+
+
+def test_stop_scan_is_not_quadratic(monkeypatch):
+    """Per-token scan must start near the tail of the accumulator (bounded by
+    the stop length), not rescan from position 0 every time — otherwise a long
+    generation pays O(n^2) (issue #54)."""
+    b = _StopBuf(["never-matches-xyz"])  # len 17, so hold == 16
+    starts = []
+    orig_earliest_stop = _StopBuf.earliest_stop
+
+    def recording_earliest_stop(text, stops, start=0):
+        starts.append(start)
+        return orig_earliest_stop(text, stops, start)
+
+    monkeypatch.setattr(_StopBuf, "earliest_stop", staticmethod(recording_earliest_stop))
+    for _ in range(2000):
+        b.push("x")
+    # after warmup, each scan's start position must sit within `hold` chars of
+    # the accumulator's current length, not stay pinned at (or near) 0.
+    for i, start in enumerate(starts[20:], start=20):
+        assert start >= i - b.hold
+
+
 def test_earliest_stop_used_by_tools_path():
     """The tools branch of _run_chat truncates its raw text buffer at the earliest
     stop sequence via this static helper (issue #26: stop was previously ignored
