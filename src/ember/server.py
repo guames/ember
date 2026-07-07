@@ -1791,6 +1791,12 @@ class Handler(BaseHTTPRequestHandler):
                     return None, None
 
     def do_GET(self):
+        try:
+            self._get()
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # client with a short timeout gave up (e.g. a status poller) — keep the log clean
+
+    def _get(self):
         path = self.path.rstrip("/")
         if path.endswith("/health"):
             return self._json(200, {"status": "ok"})
