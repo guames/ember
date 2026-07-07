@@ -1,8 +1,16 @@
 # Benchmarks
 
-Real measurements taken while building Ember. **Hardware: Apple M5, 24 GB unified
-memory, 10 cores** (macOS, `mlx-lm` 0.31). Numbers are a guide, not a guarantee — your
-mileage varies with quant, context and thermals.
+Real measurements taken while building Ember. **All numbers in this file come from a
+single machine: Apple M5, 24 GB unified memory, 10 cores** (macOS, `mlx-lm` 0.31).
+
+Ember itself runs on any Apple Silicon Mac and
+[adapts its memory defaults to your RAM](memory.md#ram-profiles-auto-defaults) — but these
+*numbers* don't transfer 1:1. Generation is memory-bandwidth bound, so the relative
+conclusions (MoE ≫ dense, 3-bit faster than 4-bit) should hold across the M-series, while
+absolute tok/s scales with your chip's bandwidth and "what fits" scales with your RAM.
+Numbers are a guide, not a guarantee — mileage varies with quant, context and thermals.
+Have a different config (M1–M4, 8–128 GB)? Contribute your measurements in
+[#84](https://github.com/guames/ember/issues/84).
 
 - **tok/s** = generation throughput (reasoning/"thinking" off where applicable).
 - **RAM** = resident memory with the model loaded (weights + working set), at the

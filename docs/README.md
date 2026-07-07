@@ -10,8 +10,8 @@ are OpenAI-compatible unless noted.
 | [Vision (multimodal)](vision.md) | image inputs, `vision: true` models, the mlx-vlm path |
 | [Structured output](response-format.md) | `response_format` — guaranteed JSON object / JSON-schema via constrained decoding |
 | [Prompt cache](prompt-cache.md) | longest-common-prefix KV reuse and what resets it |
-| [Adaptive memory](memory.md) | multi-runner budget, admission control, KV-cache relief, every env knob |
-| [Benchmarks](benchmarks.md) | Apple M5 24 GB — tok/s and RAM, MLX vs Ollama |
+| [Adaptive memory](memory.md) | multi-runner budget, RAM profiles (auto defaults per machine), admission control, KV-cache relief, every env knob |
+| [Benchmarks](benchmarks.md) | tok/s and RAM, MLX vs Ollama (measured on an Apple M5 24 GB) |
 
 New to Ember? Start with the [README](../README.md) (install + getting started),
 then come back here for the per-feature details.

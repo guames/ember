@@ -66,11 +66,32 @@ with the `keep_alive` field — a number of seconds or a string like `"30s"`, `"
 `"1h"` (`0`/negative = never expire). `ember ps` shows each model's idle time and
 keep-alive.
 
+## RAM profiles (auto defaults)
+
+Ember picks its out-of-the-box memory defaults from your Mac's **total RAM**
+(`memory_policy.scale_defaults`), so the same install behaves sensibly on an 8 GB Air and
+a 128 GB Studio. Setting the corresponding env var always overrides the profile.
+
+| Total RAM | `MLX_MAX_RUNNERS` | `MLX_MIN_FREE_GB` | `MLX_DEFAULT_EST_GB` | wired headroom |
+|---|--:|--:|--:|--:|
+| ≤ 10 GB | 1 | 1.0 | 3.0 | 2 GB |
+| 10–40 GB | 4 | 2.0 | 8.0 | 5 GB |
+| 40–80 GB | 6 | 4.0 | 8.0 | 8 GB |
+| > 80 GB | 8 | 8.0 | 8.0 | 16 GB |
+
+("Wired headroom" is what `MLX_WIRED_LIMIT_GB` leaves for the OS: the auto ceiling is
+`total − headroom`.)
+
+These profiles were dogfooded on a 24 GB machine (the 10–40 GB row); the other rows are
+principled extrapolations. If a bucket misbehaves on your hardware, override the envs and
+please report it in [#84](https://github.com/guames/ember/issues/84).
+
 ## Boot-time tuning
 
 - **Wired-memory pinning** keeps the weights resident so the OS doesn't compress/page them
-  near the RAM limit (which would make speed erratic). Auto by default — `total − 5 GB`,
-  leaving headroom for the OS — or set `MLX_WIRED_LIMIT_GB` explicitly.
+  near the RAM limit (which would make speed erratic). Auto by default — `total −
+  headroom`, where the headroom comes from your [RAM profile](#ram-profiles-auto-defaults)
+  — or set `MLX_WIRED_LIMIT_GB` explicitly.
 - **Chunked prefill** (`MLX_PREFILL_STEP`, default 512) processes a cold prompt in chunks
   to lower peak RAM. With the prompt cache, normal prefill is already just the new suffix,
   so this mostly matters for the first long prompt.
@@ -81,17 +102,17 @@ keep-alive.
 
 | Env | Default | Meaning |
 |---|---|---|
-| `MLX_MAX_RUNNERS` | auto by RAM (`4` on 24GB) | max chat models hot at once |
-| `MLX_MIN_FREE_GB` | auto by RAM (`2.0` on 24GB) | evict a model when free RAM would fall below this |
+| `MLX_MAX_RUNNERS` | auto by [RAM profile](#ram-profiles-auto-defaults) | max chat models hot at once |
+| `MLX_MIN_FREE_GB` | auto by [RAM profile](#ram-profiles-auto-defaults) | evict a model when free RAM would fall below this |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | drop KV caches when free RAM falls below this |
-| `MLX_DEFAULT_EST_GB` | auto by RAM (`8.0` on 24GB) | size guess for an unknown incoming model |
+| `MLX_DEFAULT_EST_GB` | auto by [RAM profile](#ram-profiles-auto-defaults) | size guess for an unknown incoming model |
 | `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model (`0` = never) |
 | `MLX_MAX_QUEUE` | `32` | queue depth before returning `503` |
 | `MLX_KV_BITS` | `8` | KV cache quantization bits; `4` for more aggressive, `0` for fp16 |
 | `MLX_KV_GROUP_SIZE` | `64` | KV quantization group size |
 | `MLX_KV_QUANT_START` | `0` | quantize the KV cache from token N onward |
 | `MLX_PREFILL_STEP` | `512` | prefill chunk size (lower peak RAM) |
-| `MLX_WIRED_LIMIT_GB` | auto by RAM | wired-memory ceiling (`total − headroom`; headroom scales with RAM, `5GB` on 24GB) |
+| `MLX_WIRED_LIMIT_GB` | auto by [RAM profile](#ram-profiles-auto-defaults) | wired-memory ceiling (`total − headroom`) |
 | `MLX_CACHE_LIMIT_GB` | off | cap the MLX buffer pool |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse (see [prompt-cache.md](prompt-cache.md)) |
 | `EMBER_SIZES_CACHE` | `~/.cache/ember/sizes.json` | persisted measured model sizes across restarts (`0` disables) |
