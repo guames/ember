@@ -23,21 +23,24 @@ def _default_url():
     return f"http://{host}:{port}"
 
 
-def _request(url, path, method="GET", body=None, timeout=600):
+def _request(url, path, method="GET", body=None, timeout=600, api_key=None):
     data = json.dumps(body).encode() if body is not None else None
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     req = urllib.request.Request(
         url.rstrip("/") + path,
         data=data,
         method=method,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
     )
     return urllib.request.urlopen(req, timeout=timeout)  # noqa: S310
 
 
-def _call(url, path, method="GET", body=None):
+def _call(url, path, method="GET", body=None, api_key=None):
     """Makes the request and returns the JSON; exits with a friendly message if it fails."""
     try:
-        with _request(url, path, method, body) as resp:
+        with _request(url, path, method, body, api_key=api_key) as resp:
             return json.load(resp)
     except urllib.error.HTTPError as e:
         try:
@@ -49,10 +52,10 @@ def _call(url, path, method="GET", body=None):
         sys.exit(f"Ember did not respond at {url}. Start it with `ember serve` (or set --url).")
 
 
-def _call_text(url, path):
+def _call_text(url, path, api_key=None):
     """Like _call, but returns the raw response body (for the Prometheus text endpoint)."""
     try:
-        with _request(url, path) as resp:
+        with _request(url, path, api_key=api_key) as resp:
             return resp.read().decode()
     except urllib.error.HTTPError as e:
         sys.exit(f"error {e.code}: {e.read().decode(errors='replace')}")
@@ -80,7 +83,7 @@ def cmd_serve(args):
 
 
 def cmd_ps(args):
-    chat = _call(args.url, "/status")["loaded"]
+    chat = _call(args.url, "/status", api_key=args.api_key)["loaded"]
     rows = chat["chat"]
     if not rows:
         print("No chat model is hot.")
@@ -99,7 +102,7 @@ def cmd_ps(args):
 
 
 def cmd_status(args):
-    st = _call(args.url, "/status")
+    st = _call(args.url, "/status", api_key=args.api_key)
     cmd_ps(args)
     m = st["memory"]
     sysm = m.get("system", {})
@@ -120,7 +123,7 @@ def cmd_status(args):
 
 
 def cmd_memory(args):
-    m = _call(args.url, "/memory")
+    m = _call(args.url, "/memory", api_key=args.api_key)
     mlx = m["mlx"]
     print(
         f"MLX     active {mlx['active_gb']:.2f}G  cache {mlx['cache_gb']:.2f}G  peak {mlx['peak_gb']:.2f}G"
@@ -136,14 +139,14 @@ def cmd_memory(args):
 
 
 def cmd_metrics(args):
-    print(_call_text(args.url, "/metrics"), end="")
+    print(_call_text(args.url, "/metrics", api_key=args.api_key), end="")
 
 
 def cmd_list(args):
     try:
-        with _request(args.url, "/status") as r:
+        with _request(args.url, "/status", api_key=args.api_key) as r:
             hot = {c["name"] for c in json.load(r)["loaded"]["chat"]}
-        models = _call(args.url, "/v1/models")["data"]
+        models = _call(args.url, "/v1/models", api_key=args.api_key)["data"]
         print(f"{'MODEL':<34}STATE")
         for mdl in models:
             mark = "● hot" if mdl["id"] in hot else "○ cold"
@@ -170,7 +173,7 @@ def cmd_run(args):
         "stream": True,
     }
     try:
-        with _request(args.url, "/v1/chat/completions", "POST", body) as resp:
+        with _request(args.url, "/v1/chat/completions", "POST", body, api_key=args.api_key) as resp:
             for raw in resp:
                 line = raw.decode().strip()
                 if not line.startswith("data: ") or line == "data: [DONE]":
@@ -189,19 +192,19 @@ def cmd_run(args):
 
 def cmd_warm(args):
     body = {"model": args.model, "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
-    _call(args.url, "/v1/chat/completions", "POST", body)
+    _call(args.url, "/v1/chat/completions", "POST", body, api_key=args.api_key)
     print(f"'{args.model}' loaded and hot.")
     cmd_ps(args)
 
 
 def cmd_unload(args):
-    res = _call(args.url, "/unload", "POST", {"target": args.target})
+    res = _call(args.url, "/unload", "POST", {"target": args.target}, api_key=args.api_key)
     freed = res.get("unloaded") or []
     print(f"unloaded: {', '.join(freed) if freed else 'nothing'}")
 
 
 def cmd_clear(args):
-    res = _call(args.url, "/clear", "POST", {"target": args.target})
+    res = _call(args.url, "/clear", "POST", {"target": args.target}, api_key=args.api_key)
     cleared = res.get("cleared") or []
     print(f"cleared ({args.target}): {', '.join(cleared) if cleared else 'nothing'}")
 
@@ -242,6 +245,11 @@ def build_parser():
         if url:
             sp.add_argument(
                 "--url", default=_default_url(), help="server base (default %(default)s)"
+            )
+            sp.add_argument(
+                "--api-key",
+                default=os.environ.get("EMBER_API_KEY") or None,
+                help="bearer token for an authenticated server (default $EMBER_API_KEY)",
             )
         return sp
 
