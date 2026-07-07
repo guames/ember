@@ -80,6 +80,7 @@ import hashlib
 import hmac
 import itertools
 import json
+import math
 import os
 import queue
 import re
@@ -1213,22 +1214,33 @@ def embeddings(texts):
         # (in-batch dedup only skips the redundant forward passes, not the reported token count).
         prompt_tokens = sum(len(pending_tok_ids[h]) * len(idxs) for h, idxs in pending.items())
 
-        # mlx_embeddings.generate pads to the longest text in the batch; pooling/normalization
-        # over the padded positions yields all-NaN embeddings for the shorter texts (and
-        # json.dumps then emits the bare literal `NaN`, invalid JSON for strict clients).
-        # Bucketing by exact tokenized length before batching sidesteps the padding entirely —
-        # every text in a bucket is the same length, so there is nothing to pad. See issue #5.
-        buckets = {}
-        for h in pending:
-            buckets.setdefault(len(pending_tok_ids[h]), []).append(h)
-        for hs in buckets.values():
-            batch_texts = [texts[pending[h][0]] for h in hs]
-            out = mlx_embeddings.generate(model, proc, batch_texts).text_embeds.tolist()
-            for h, v in zip(hs, out, strict=True):
-                for i in pending[h]:
-                    vecs[i] = v
-                if cache is not None:
-                    cache.put(h, v)
+        # mlx_embeddings.generate pads to the longest text in the batch. Bucketing by exact
+        # tokenized length used to sidestep this (every text in a bucket the same length, so
+        # nothing to pad — issue #5), but that degenerates to batch=1 on real corpora where
+        # almost every text has a unique length, throwing away GPU batch throughput.
+        #
+        # The NaN isn't actually a pooling artifact: it's the quantized ModernBERT encoder's
+        # own sliding-window attention producing a genuine NaN hidden state at some padded
+        # position, which then poisons every position in that row (real tokens included) via
+        # later attention layers — masking correctly during pooling can't undo that, since the
+        # damage is already done by the time pooling runs. It's also not a clean function of
+        # padding amount (the same pair of texts can NaN at one padded length and not another),
+        # so there's no safe bucket granularity to pick. Instead: batch every pending text in
+        # one call regardless of length, then re-embed — one text at a time, which needs no
+        # padding and is therefore always clean — whichever rows come back NaN. See issue #77.
+        hs = list(pending)
+        batch_texts = [texts[pending[h][0]] for h in hs]
+        out = mlx_embeddings.generate(model, proc, batch_texts).text_embeds.tolist()
+        for i, row in enumerate(out):
+            if any(math.isnan(x) for x in row):
+                out[i] = mlx_embeddings.generate(
+                    model, proc, [batch_texts[i]]
+                ).text_embeds.tolist()[0]
+        for h, v in zip(hs, out, strict=True):
+            for i in pending[h]:
+                vecs[i] = v
+            if cache is not None:
+                cache.put(h, v)
 
     return vecs, prompt_tokens
 

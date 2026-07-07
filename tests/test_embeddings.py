@@ -1,11 +1,12 @@
 """Tests for the embeddings endpoint helper (model-free, via monkeypatch).
 
-Regression for issue #5: mlx_embeddings.generate pads to the longest text in a batch, so
-pooling over the padded positions returns all-NaN embeddings for the shorter texts. The fix
-(issue #24) buckets by exact tokenized length before batching — same-length texts share no
-padding, so they can go through generate() as a real batch, while different-length texts must
-never land in the same call. These tests lock both the length-bucketing invariant and the
-content-hash cache (issue #24) without loading any model.
+Regression for issue #5 / #77: mlx_embeddings' quantized ModernBERT encoder can return a
+NaN row for a padded batch (a bug inside the encoder's own attention, not the pooling step).
+The original fix (issue #24) bucketed by exact tokenized length to avoid padding entirely,
+but that degenerates to batch=1 on real corpora. The current fix (issue #77) batches every
+pending text in one call regardless of length, then re-embeds -- one text at a time, which
+needs no padding and is therefore always clean -- whichever rows come back NaN. These tests
+lock that fallback behavior and the content-hash cache (issue #24) without loading any model.
 """
 
 import queue
@@ -44,28 +45,49 @@ class _FakeCache:
         self.store[h] = vec
 
 
-def test_embeddings_never_mixes_lengths_in_one_batch(monkeypatch):
-    """Different-length texts must never share a generate() call (that is what NaNs the short
-    ones); same-length texts are batched together."""
+def test_embeddings_batches_mixed_lengths_in_one_call(monkeypatch):
+    """Different-length texts share one generate() call -- no more exact-length bucketing."""
     monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
     monkeypatch.setattr(server, "EMBED_CACHE", False)
     calls = []
 
     def fake_generate(model, p, texts):
         assert model == "M"
-        lens = {len(t) for t in texts}
-        assert len(lens) == 1  # the invariant: never a mixed-length batch
         calls.append(list(texts))
         return _fake_out([[float(len(t))] * 3 for t in texts])
 
     monkeypatch.setattr(mlx_embeddings, "generate", fake_generate)
 
-    # "aa" and "cd" share length 2 and must batch together; "efg" (length 3) is separate.
     vecs, prompt_tokens = server.embeddings(["aa", "cd", "efg"])
 
-    assert calls == [["aa", "cd"], ["efg"]]
+    assert calls == [["aa", "cd", "efg"]]  # one batch call regardless of length mix
     assert vecs == [[2.0, 2.0, 2.0], [2.0, 2.0, 2.0], [3.0, 3.0, 3.0]]
     assert prompt_tokens == 2 + 2 + 3
+
+
+def test_embeddings_reembeds_nan_rows_one_at_a_time(monkeypatch):
+    """A NaN row from the batched call (the quantized encoder's own bug, issue #77) gets a
+    fallback re-embed of just that text alone -- which needs no padding and is always clean."""
+    monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
+    monkeypatch.setattr(server, "EMBED_CACHE", False)
+    calls = []
+
+    def fake_generate(model, p, texts):
+        calls.append(list(texts))
+        if len(texts) > 1:
+            # simulate the encoder corrupting "b"'s row in the padded batch
+            return _fake_out(
+                [[float("nan"), float("nan")] if t == "b" else [1.0, 1.0] for t in texts]
+            )
+        return _fake_out([[9.0, 9.0]])  # single-item re-embed is always clean
+
+    monkeypatch.setattr(mlx_embeddings, "generate", fake_generate)
+
+    vecs, prompt_tokens = server.embeddings(["a", "b", "ccc"])
+
+    assert calls == [["a", "b", "ccc"], ["b"]]  # one batch call, then a fallback for "b" alone
+    assert vecs == [[1.0, 1.0], [9.0, 9.0], [1.0, 1.0]]
+    assert prompt_tokens == 1 + 1 + 3
 
 
 def test_embeddings_dedups_repeated_text_within_one_call(monkeypatch):
@@ -82,7 +104,7 @@ def test_embeddings_dedups_repeated_text_within_one_call(monkeypatch):
 
     vecs, prompt_tokens = server.embeddings(["same", "same", "other"])
 
-    assert calls == [["same"], ["other"]]  # "same" embedded once despite appearing twice
+    assert calls == [["same", "other"]]  # "same" embedded once despite appearing twice
     assert vecs[0] == vecs[1] == [4.0]
     assert vecs[2] == [5.0]
     assert prompt_tokens == 4 + 4 + 5  # usage still reflects what was actually requested
