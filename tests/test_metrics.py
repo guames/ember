@@ -338,6 +338,9 @@ def test_run_chat_records_error_metric_for_non_vision_image(clean_metrics):
                     }
                 ]
             },
+            # resolved on the handler thread in real requests (issue #74); the fake job
+            # payload supplies it directly since this test drives _run_chat standalone
+            "images": ["data:,x"],
         }
     )
     job.out = server.queue.Queue()

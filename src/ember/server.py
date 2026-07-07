@@ -144,6 +144,9 @@ API_KEY = os.environ.get("EMBER_API_KEY") or None  # unset = no auth (default, l
 SHUTDOWN_TIMEOUT = float(os.environ.get("EMBER_SHUTDOWN_TIMEOUT", "30"))  # s to drain on SIGTERM
 MAX_BODY_MB = float(os.environ.get("EMBER_MAX_BODY_MB", "32"))  # request body cap
 MAX_BODY_BYTES = int(MAX_BODY_MB * 1024 * 1024)
+ALLOW_IMAGE_URLS = os.environ.get("EMBER_ALLOW_IMAGE_URLS", "0") not in ("0", "false", "")
+ALLOW_IMAGE_PATHS = os.environ.get("EMBER_ALLOW_IMAGE_PATHS", "0") not in ("0", "false", "")
+IMAGE_FETCH_TIMEOUT_S = 10
 METRICS_LOG_PATH = os.environ.get(
     "EMBER_METRICS_LOG", os.path.expanduser("~/.cache/ember/metrics.jsonl")
 )
@@ -1221,6 +1224,43 @@ def _extract_images(messages):
     return imgs
 
 
+def _resolve_images(sources):
+    """Validates and decodes each image source on the caller's thread (the HTTP handler,
+    never the GPU worker -- issue #74), returning a PIL.Image per source so the worker
+    never has to touch the network or filesystem itself. data: URIs are always accepted
+    (already inline, no I/O). http(s):// URLs require EMBER_ALLOW_IMAGE_URLS. Anything
+    else is treated as a local path and requires EMBER_ALLOW_IMAGE_PATHS. Raises
+    ValueError with a client-safe message on any rejection or fetch/read failure.
+
+    Uses mlx_vlm's own load_image so the result matches exactly what mlx-vlm's generation
+    path would have produced itself (RGB, exif-transposed) -- process_image() only calls
+    load_image() for str sources, so a pre-loaded PIL.Image here is what must come out.
+    """
+    from mlx_vlm.utils import load_image
+
+    out = []
+    for src in sources:
+        if not isinstance(src, str):
+            raise ValueError(f"invalid image source: {src!r}")
+        if not src.startswith("data:"):
+            if src.startswith("http://") or src.startswith("https://"):
+                if not ALLOW_IMAGE_URLS:
+                    raise ValueError(
+                        "image URLs are disabled (set EMBER_ALLOW_IMAGE_URLS=1 to allow "
+                        "fetching remote images)"
+                    )
+            elif not ALLOW_IMAGE_PATHS:
+                raise ValueError(
+                    "local image paths are disabled (set EMBER_ALLOW_IMAGE_PATHS=1 to allow "
+                    "reading local files as images)"
+                )
+        try:
+            out.append(load_image(src, timeout=IMAGE_FETCH_TIMEOUT_S))
+        except Exception as e:  # noqa: BLE001
+            raise ValueError(f"failed to load image: {e}") from e
+    return out
+
+
 def _gen_vlm(job, name, model, proc, body, messages, images):
     """Multimodal generation via mlx-vlm. Streams deltas like the text path
     (no tools, no prompt cache). skip_special_tokens avoids leaking template
@@ -1355,7 +1395,7 @@ def _run_chat(job):
     t0 = time.monotonic()
     name, body = job.payload["name"], job.payload["body"]
     messages = body.get("messages", [])
-    images = _extract_images(messages)
+    images = job.payload.get("images") or []  # resolved on the handler thread (issue #74)
     if images and not CFG.get(name, {}).get("vision"):  # reject before loading
         msg = (
             f"model '{name}' is not a vision model (config vision:true); got {len(images)} image(s)"
@@ -1902,7 +1942,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
         if name not in CFG:
             return self._error(404, f"unknown model '{name}'", err_code="model_not_found")
-        job = _submit(P_CHAT, "chat", {"name": name, "body": body})
+        sources = _extract_images(body.get("messages", []))
+        try:
+            images = _resolve_images(sources)  # fetched/read here, never on the GPU worker
+        except ValueError as e:
+            return self._error(400, str(e))
+        job = _submit(P_CHAT, "chat", {"name": name, "body": body, "images": images})
         if job is None:
             return self._error(503, "queue full (maxQueue)", err_code="queue_full")
         cid, created = "chatcmpl-" + uuid.uuid4().hex[:20], int(time.time())
