@@ -76,6 +76,7 @@ Observability: every chat/fim/embed request appends a JSON line (endpoint, model
 import array
 import gc
 import hashlib
+import hmac
 import itertools
 import json
 import os
@@ -1739,6 +1740,7 @@ def _usage_obj(u):
 # ---------------------------------------------------------------- HTTP
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    timeout = 60  # s; a connection that never sends anything can't hold a thread forever
 
     def log_message(self, *a):
         pass
@@ -1763,7 +1765,8 @@ class Handler(BaseHTTPRequestHandler):
         /health (process supervisors need it key-free)."""
         if not API_KEY:
             return True
-        return self.headers.get("Authorization") == f"Bearer {API_KEY}"
+        got = self.headers.get("Authorization") or ""
+        return hmac.compare_digest(got, f"Bearer {API_KEY}")
 
     def _reject_unauthorized(self):
         self._error(
@@ -1852,22 +1855,37 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.rstrip("/")
         if _shutting_down.is_set():
             return self._error(503, "server is shutting down", err_code="shutting_down")
-        length = int(self.headers.get("Content-Length", 0))
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            # We don't decode chunked bodies, and the Content-Length below would be
+            # absent/wrong for one -- there's no safe number of bytes to drain, so the
+            # framing of this connection is unrecoverable. Reject and close rather than
+            # risk corrupting whatever request comes next on the same connection.
+            self.close_connection = True
+            return self._error(
+                411, "chunked request bodies are not supported", err_code="length_required"
+            )
+        try:
+            length = int(self.headers.get("Content-Length", 0))
+        except ValueError:
+            return self._error(400, "invalid Content-Length header", err_code="invalid_request")
         if length > MAX_BODY_BYTES:
             return self._error(
                 413,
                 f"request body exceeds the {MAX_BODY_MB:g}MB limit",
                 err_code="request_too_large",
             )
-        try:
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except ValueError:
-            return self._error(400, "invalid JSON in request body", err_code="invalid_json")
+        raw = self.rfile.read(length)
         # Auth check comes after the body is drained (not before): rejecting first would
         # leave the client's body bytes unread on the socket, which under keep-alive
-        # corrupts the framing of whatever request comes next on the same connection.
+        # corrupts the framing of whatever request comes next on the same connection. JSON
+        # parsing happens *after* the auth check so an unauthenticated caller can't spend
+        # our CPU decoding an arbitrarily large body just to get rejected anyway.
         if not self._authorized():
             return self._reject_unauthorized()
+        try:
+            body = json.loads(raw or b"{}")
+        except ValueError:
+            return self._error(400, "invalid JSON in request body", err_code="invalid_json")
         try:
             if path.endswith("/chat/completions"):
                 self._chat(body)
@@ -2111,6 +2129,12 @@ def serve(host=None, port=None):
         f"queue<={MAX_QUEUE}, auth={'on' if API_KEY else 'off'}]",
         flush=True,
     )
+    if not API_KEY and host not in ("127.0.0.1", "localhost", "::1"):
+        print(
+            f"[ember] WARNING: bound to {host} with no EMBER_API_KEY set -- every route "
+            "(including /unload and /clear) is reachable by anyone who can reach this host",
+            flush=True,
+        )
     _tune_memory()
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
