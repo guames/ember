@@ -966,7 +966,8 @@ def gen_fim(body):
         gen_ids.append(int(r.token))
         if scanner.scan(r.text) != -1:
             break
-    _store_ac_cache(ptoks + gen_ids, cache)
+    if PROMPT_CACHE:  # matching off -> don't retain the cache either (issue #72)
+        _store_ac_cache(ptoks + gen_ids, cache)
     if reused:
         print(
             f"[router] cache autocomplete: reused {reused}/{len(ptoks)} prompt tokens", flush=True
@@ -1290,12 +1291,14 @@ def _reuse_cache(name, model, ptoks):
     slot to reuse/evict is the pure `memory_policy.select_prompt_cache_slot`; this just
     carries out the trim on the chosen slot. Returns (cache, tokens_to_process, reused,
     write_idx) — `write_idx` is where `_store_cache` should save the post-generation cache."""
+    if not PROMPT_CACHE:  # matching off -> don't pay for the slot lookup either (issue #72)
+        return make_prompt_cache(model), ptoks, 0, None
     with _reg_lock:
         e = _chat.get(name)
         slots = e["slots"] if e else []
         snap = [{"tokens": s["pctoks"], "last": s["last"]} for s in slots]
     match_idx, common_len, write_idx = memory_policy.select_prompt_cache_slot(snap, ptoks)
-    if PROMPT_CACHE and match_idx is not None:
+    if match_idx is not None:
         with _reg_lock:
             slot = _chat[name]["slots"][match_idx]
             slot_c, slot_t = slot["pc"], slot["pctoks"]
@@ -1464,7 +1467,8 @@ def _run_chat(job):
                 tail = stopbuf.flush()  # drain the held-back tail (natural end)
                 if tail:
                     job.out.put(("delta", tail))
-            _store_cache(name, ptoks + gen_ids, cache, slot_idx)  # slot reflects prompt+generation
+            if slot_idx is not None:  # None when PROMPT_CACHE is off (issue #72)
+                _store_cache(name, ptoks + gen_ids, cache, slot_idx)  # reflects prompt+generation
             if reused:
                 print(
                     f"[router] cache {name}: reused {reused}/{len(ptoks)} prompt tokens", flush=True
