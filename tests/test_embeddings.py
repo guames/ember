@@ -154,6 +154,83 @@ def test_embed_cache_evicts_oldest_past_size_cap(tmp_path):
     assert cache.get("h29") == [29.0] * 64  # most recently put entry survives
 
 
+def test_embed_cache_enables_wal_mode(tmp_path):
+    """journal_mode=WAL (+ synchronous=NORMAL) so recency updates don't each pay a synchronous
+    fsync (issue #76)."""
+    cache = server._EmbedCache(str(tmp_path / "cache.sqlite3"))
+    mode = cache._conn.execute("PRAGMA journal_mode").fetchone()[0]
+    assert mode.lower() == "wal"
+    sync = cache._conn.execute("PRAGMA synchronous").fetchone()[0]
+    assert sync == 1  # NORMAL
+
+
+def test_embed_cache_get_batches_last_used_touches(tmp_path, monkeypatch):
+    """Repeated get() hits accumulate last_used in memory and don't commit (i.e. don't fsync)
+    until the batch threshold is reached -- a fully-cached re-index run shouldn't pay one
+    write-transaction per hit (issue #76)."""
+    monkeypatch.setattr(server, "_EMBED_CACHE_TOUCH_BATCH", 3)
+    path = str(tmp_path / "cache.sqlite3")
+    cache = server._EmbedCache(path)
+
+    clock = iter([100.0, 200.0, 201.0, 202.0])
+    monkeypatch.setattr(server.time, "time", lambda: next(clock))
+
+    cache.put("h1", [1.0, 2.0])  # last_used = 100.0 (consumes first clock value)
+
+    def on_disk_last_used():
+        # A second connection only sees committed data -- this proves whether get() flushed.
+        other = server.sqlite3.connect(path)
+        try:
+            return other.execute(
+                "SELECT last_used FROM embeddings_v2 WHERE hash = ?", ("h1",)
+            ).fetchone()[0]
+        finally:
+            other.close()
+
+    assert cache.get("h1") == [1.0, 2.0]  # hit #1 -> pending last_used = 200.0
+    assert cache.get("h1") == [1.0, 2.0]  # hit #2 -> pending last_used = 201.0
+    assert cache._pending_touches == {"h1": 201.0}
+    assert on_disk_last_used() == 100.0  # neither hit has been committed yet
+
+    assert cache.get("h1") == [1.0, 2.0]  # hit #3 crosses the threshold -> flush + commit
+    assert cache._pending_touches == {}
+    assert on_disk_last_used() == 202.0
+
+
+def test_embed_cache_put_flushes_pending_touches(tmp_path, monkeypatch):
+    """put() flushes any pending last_used touches (folded into its own commit) instead of
+    leaving them stranded in memory (issue #76)."""
+    monkeypatch.setattr(server, "_EMBED_CACHE_TOUCH_BATCH", 1000)  # never hit via count alone
+    cache = server._EmbedCache(str(tmp_path / "cache.sqlite3"))
+    cache.put("h1", [1.0])
+    cache.get("h1")
+    assert cache._pending_touches  # one touch pending, below the batch threshold
+
+    cache.put("h2", [2.0])
+    assert cache._pending_touches == {}  # put() flushed it
+
+
+def test_embed_cache_close_flushes_pending_touches(tmp_path, monkeypatch):
+    """close() flushes pending touches so a clean shutdown doesn't drop recency data that only
+    existed in memory (issue #76)."""
+    monkeypatch.setattr(server, "_EMBED_CACHE_TOUCH_BATCH", 1000)
+    path = str(tmp_path / "cache.sqlite3")
+    cache = server._EmbedCache(path)
+    cache.put("h1", [1.0])
+    cache.get("h1")
+    assert cache._pending_touches
+    cache.close()
+
+    other = server.sqlite3.connect(path)
+    try:
+        last_used = other.execute(
+            "SELECT last_used FROM embeddings_v2 WHERE hash = ?", ("h1",)
+        ).fetchone()[0]
+    finally:
+        other.close()
+    assert last_used > 0
+
+
 def test_embeddings_cache_disabled_never_touches_cache(monkeypatch):
     monkeypatch.setattr(server, "em_model", lambda: ("M", _FakeProc()))
     monkeypatch.setattr(server, "EMBED_CACHE", False)
