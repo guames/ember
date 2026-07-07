@@ -50,7 +50,7 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
       EMBER_API_KEY(off) EMBER_SHUTDOWN_TIMEOUT(30)
       EMBER_METRICS_LOG(~/.cache/ember/metrics.jsonl, "0" to disable)
-      EMBER_SIZES_CACHE(~/.cache/ember/sizes.json, "0" to disable)
+      EMBER_METRICS_LOG_MAX_MB(64, "0" for unbounded) EMBER_SIZES_CACHE(~/.cache/ember/sizes.json, "0" to disable)
 
 Ops: GET /health is an unauthenticated 200 for process supervisors (LaunchAgent, systemd).
      EMBER_API_KEY, when set, requires `Authorization: Bearer <key>` on every other route
@@ -60,9 +60,11 @@ Ops: GET /health is an unauthenticated 200 for process supervisors (LaunchAgent,
 
 Observability: every chat/fim/embed request appends a JSON line (endpoint, model, latency,
      prompt/completion/cached tokens, status) to EMBER_METRICS_LOG — additive to the existing
-     print(...) logging, not a replacement. GET /metrics exposes the same counters/latency
-     histogram in Prometheus text format for scraping; it has no time-series memory of its
-     own (restart resets it), so long-term history lives in the JSONL log instead.
+     print(...) logging, not a replacement. The log is written through one persistent append
+     handle and rotates to a single `.1` generation past EMBER_METRICS_LOG_MAX_MB, so it stays
+     bounded on disk. GET /metrics exposes the same counters/latency histogram in Prometheus
+     text format for scraping; it has no time-series memory of its own (restart resets it), so
+     long-term history lives in the JSONL log instead.
 
     ember                          # CLI (port 8000 or env MLX_ROUTER_PORT)
     python -m ember
@@ -147,6 +149,8 @@ if METRICS_LOG_PATH in (
     "",
 ):  # opt out of the JSONL log (the /metrics counters still work)
     METRICS_LOG_PATH = None
+METRICS_LOG_MAX_MB = float(os.environ.get("EMBER_METRICS_LOG_MAX_MB", "64"))  # 0 = unbounded
+METRICS_LOG_MAX_BYTES = int(METRICS_LOG_MAX_MB * 1024 * 1024) if METRICS_LOG_MAX_MB > 0 else 0
 SIZES_CACHE_PATH = os.environ.get(
     "EMBER_SIZES_CACHE", os.path.expanduser("~/.cache/ember/sizes.json")
 )
@@ -161,6 +165,36 @@ _worker_busy = threading.Event()
 _METRICS_BUCKETS = (0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120)  # seconds
 _metrics_lock = threading.Lock()
 _metrics = {}  # (endpoint, model, status) -> aggregate dict
+_metrics_log_fh = None  # persistent append handle (issue #57); reopened on rotation/write error
+
+
+def _write_metrics_log(line):
+    """Appends one line to METRICS_LOG_PATH through a persistent open(.... "a") handle,
+    rotating to a single `.1` generation once the file passes METRICS_LOG_MAX_BYTES. Best-effort:
+    any failure closes/drops the handle (reopened on the next call) and logs, never raises."""
+    global _metrics_log_fh
+    with _metrics_lock:
+        try:
+            if _metrics_log_fh is None:
+                os.makedirs(os.path.dirname(METRICS_LOG_PATH), exist_ok=True)
+                _metrics_log_fh = open(METRICS_LOG_PATH, "a")
+            _metrics_log_fh.write(line)
+            _metrics_log_fh.flush()
+            if METRICS_LOG_MAX_BYTES and _metrics_log_fh.tell() >= METRICS_LOG_MAX_BYTES:
+                _metrics_log_fh.close()
+                _metrics_log_fh = None
+                try:
+                    os.replace(METRICS_LOG_PATH, METRICS_LOG_PATH + ".1")
+                except OSError:
+                    pass
+        except Exception as e:  # noqa: BLE001
+            print(f"[router] metrics log write failed (continuing): {e}", flush=True)
+            if _metrics_log_fh is not None:
+                try:
+                    _metrics_log_fh.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            _metrics_log_fh = None
 
 
 def _record_metrics(
@@ -183,12 +217,7 @@ def _record_metrics(
     if error:
         entry["error"] = error
     if METRICS_LOG_PATH:
-        try:
-            os.makedirs(os.path.dirname(METRICS_LOG_PATH), exist_ok=True)
-            with open(METRICS_LOG_PATH, "a") as f:
-                f.write(json.dumps(entry) + "\n")
-        except Exception as e:  # noqa: BLE001
-            print(f"[router] metrics log write failed (continuing): {e}", flush=True)
+        _write_metrics_log(json.dumps(entry) + "\n")
     with _metrics_lock:
         m = _metrics.setdefault(
             (endpoint, model, status),
@@ -1236,6 +1265,7 @@ def _run_chat(job):
     err = _num_ctx_error(p.get("num_ctx"), len(ptoks))
     if err:
         job.out.put(("error", err))
+        _record_metrics("chat", name, time.monotonic() - t0, error=err)
         return
     retried_gen_oom = False
     while True:
