@@ -8,6 +8,7 @@ never land in the same call. These tests lock both the length-bucketing invarian
 content-hash cache (issue #24) without loading any model.
 """
 
+import queue
 import types
 
 import mlx_embeddings
@@ -208,3 +209,29 @@ def test_drain_short_yields_after_one_job(monkeypatch):
     server._drain_short()
     assert ran == ["job-a", "job-b"]
     assert server._q.empty()
+
+
+def test_drain_short_fails_chat_job_when_put_back_races_full(monkeypatch):
+    """Issue #58: if the put-back of a chat job loses a race to a producer filling the queue,
+    _drain_short must fail that job with the same queue_full error _submit's callers get at
+    admission time -- not dispatch it inline, which would nest a full chat generation loop
+    inside the caller's own token loop (_drain_short is called from _run_chat's token loop)."""
+
+    class _AlwaysFullQueue(queue.PriorityQueue):
+        def put_nowait(self, item):
+            raise queue.Full
+
+    fake_q = _AlwaysFullQueue()
+    job = server.Job("chat", {})
+    fake_q.put((server.P_CHAT, next(server._seq), job))  # seed via blocking put, not put_nowait
+    monkeypatch.setattr(server, "_q", fake_q)
+
+    ran = []
+    monkeypatch.setattr(server, "_dispatch", lambda j: ran.append(j))
+
+    server._drain_short()
+
+    assert ran == []  # never dispatched inline
+    kind, data = job.out.get_nowait()
+    assert kind == "error"
+    assert data == "queue full (maxQueue)"
