@@ -1,0 +1,39 @@
+# Ember model preset — 32 GB Macs.
+#
+# 32 GB sits in Ember's "10-40 GB" RAM profile (docs/memory.md#ram-profiles-auto-defaults):
+# MLX_MAX_RUNNERS=4, 2 GB min free, 5 GB wired headroom. Room for one MoE-class 30B chat
+# model hot — MoE trades RAM for speed, see docs/benchmarks.md's "MoE wins big" takeaway —
+# plus a small vision model, plus the pinned autocomplete + embed models.
+#
+# Numbers below are from docs/benchmarks.md, measured on the project's reference machine
+# (Apple M5, 24 GB unified memory) — tok/s will differ on your chip, but resident RAM and
+# the relative ranking (MoE >> dense at the same RAM) carry over.
+#
+# Copy this file to `ember.yaml` (or point EMBER_CONFIG at it) and edit as needed.
+
+models:
+  # --- fast MoE, best quality/speed tradeoff: ~19 GB resident, 53 tok/s on the M5 ref machine ---
+  - name: qwen3-30b-a3b
+    mlx: mlx-community/Qwen3-30B-A3B-Instruct-2507-4bit-DWQ
+    params: { temperature: 0.0, top_p: 0.95, top_k: 20, num_ctx: 8192 }
+
+  # --- vision (needs the [vision] extra: pip install "ember-mlx[vision]") ---
+  # ~2 GB resident, accepts images.
+  - name: qwen2.5-vl
+    mlx: mlx-community/Qwen2.5-VL-3B-Instruct-4bit
+    vision: true
+    params: { temperature: 0.0, num_ctx: 16384 }
+
+# Pinned (always hot, don't compete with the chat/vision runner slots above).
+autocomplete:
+  name: autocomplete
+  mlx: mlx-community/Qwen2.5-Coder-1.5B-4bit       # FIM-capable base model, ~1 GB resident
+
+embed:
+  name: embed
+  mlx: mlx-community/nomicai-modernbert-embed-base-4bit   # well under 1 GB resident
+
+# Total resident with everything hot: ~22.5 GB (2 of 4 available runners used), leaving
+# ~9 GB free for context/KV cache, admission-control headroom and the OS. If RAM gets
+# tight, Ember LRU-evicts chat/vision runners automatically (docs/memory.md) — the pinned
+# autocomplete and embed models are the last to go.
