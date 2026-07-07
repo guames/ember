@@ -106,3 +106,47 @@ def test_clear_handler_returns_500_on_worker_error(clean, monkeypatch):
     )
     h._clear({"target": "all"})
     assert errors == [(500, "boom")]
+
+
+# ---------------------------------------------------------------- _loaded() lock coverage (issue #82)
+class _LockCheckingDict(dict):
+    """Stands in for the module's `_ac` dict; asserts that "pctoks" -- the one field
+    _loaded() used to read after releasing _reg_lock -- is only ever accessed while the
+    lock is held, whether through `.get(...)` or `[...]`."""
+
+    def __init__(self, data, lock):
+        super().__init__(data)
+        self._lock = lock
+
+    def _check(self, key):
+        if key == "pctoks":
+            assert self._lock.locked(), "_ac['pctoks'] must be read while holding _reg_lock"
+
+    def get(self, key, default=None):
+        self._check(key)
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        self._check(key)
+        return super().__getitem__(key)
+
+
+def test_loaded_reads_ac_pctoks_inside_reg_lock(clean, monkeypatch):
+    ac = _LockCheckingDict(
+        {"model": "m", "tok": None, "pc": None, "pctoks": [1, 2, 3], "last": 0.0, "ka": -1},
+        server._reg_lock,
+    )
+    monkeypatch.setattr(server, "_ac", ac)
+    snap = server._loaded()
+    assert snap["autocomplete_cached_tokens"] == 3
+
+
+def test_loaded_reads_ac_pctoks_inside_reg_lock_when_empty(clean, monkeypatch):
+    """Same lock-ordering check on the falsy branch (no cached tokens yet)."""
+    ac = _LockCheckingDict(
+        {"model": "m", "tok": None, "pc": None, "pctoks": None, "last": 0.0, "ka": -1},
+        server._reg_lock,
+    )
+    monkeypatch.setattr(server, "_ac", ac)
+    snap = server._loaded()
+    assert snap["autocomplete_cached_tokens"] == 0

@@ -114,6 +114,31 @@ EM_NAME, EM_REPO = _EM["name"], _EM["mlx"]  # embeddings (pinned in RAM)
 _TOTAL_GB = (psutil.virtual_memory().total / 1024**3) if psutil else 24.0
 _SCALED = memory_policy.scale_defaults(_TOTAL_GB)  # RAM-scaled defaults; envs below still win
 
+_ENV_FALSY = ("0", "false", "")  # tolerant boolean-ish spellings shared by every env below
+
+
+def _env_bool(name, default):
+    """Tolerant boolean-ish env parsing: unset -> default; "0"/"false"/"" (any case,
+    surrounding whitespace ignored) -> False; anything else -> True. One helper used
+    everywhere a flag-like env is read, so e.g. MLX_EMBED_CACHE and MLX_PROMPT_CACHE
+    can't quietly drift into accepting different spellings of "off" (issue #82)."""
+    v = os.environ.get(name)
+    if v is None:
+        return default
+    return v.strip().lower() not in _ENV_FALSY
+
+
+def _env_int_or_none(name, default):
+    """Tolerant int-ish env parsing for envs that are "N bits/units, or off": accepts a
+    plain integer, or any of the same boolean-ish falsy spellings as _env_bool (e.g. "0"
+    or "false") to mean disabled/None. Fixes MLX_KV_BITS=false crashing at import with
+    `int("false")` while MLX_EMBED_CACHE=false was already understood (issue #82)."""
+    v = os.environ.get(name, default)
+    if str(v).strip().lower() in _ENV_FALSY:
+        return None
+    return int(v)
+
+
 IDLE_TIMEOUT = float(os.environ.get("MLX_IDLE_TIMEOUT", "300"))  # s; 0/neg = never
 MAX_RUNNERS = int(os.environ.get("MLX_MAX_RUNNERS", str(_SCALED["max_runners"])))  # safety ceiling
 MIN_FREE_GB = float(
@@ -125,14 +150,13 @@ DEFAULT_EST_GB = float(
 )  # size guess when unknown
 MAX_QUEUE = int(os.environ.get("MLX_MAX_QUEUE", "32"))
 EMBED_CHUNK = int(os.environ.get("MLX_EMBED_CHUNK", "8"))  # texts per embed slice
-EMBED_CACHE = os.environ.get("MLX_EMBED_CACHE", "1") not in ("0", "false", "")  # content-hash cache
+EMBED_CACHE = _env_bool("MLX_EMBED_CACHE", True)  # content-hash cache
 EMBED_CACHE_PATH = os.environ.get(
     "MLX_EMBED_CACHE_PATH", os.path.expanduser("~/.cache/ember/embeddings.sqlite3")
 )
-PROMPT_CACHE = os.environ.get("MLX_PROMPT_CACHE", "1") not in ("0", "false", "")  # KV reuse
+PROMPT_CACHE = _env_bool("MLX_PROMPT_CACHE", True)  # KV reuse
 PROMPT_CACHE_SLOTS = max(1, int(os.environ.get("MLX_PROMPT_CACHE_SLOTS", "2")))  # KV slots/runner
-_KVB = os.environ.get("MLX_KV_BITS", "8")  # 8/4 = quantize KV cache; 0 = fp16
-KV_BITS = int(_KVB) if _KVB not in (None, "", "0") else None
+KV_BITS = _env_int_or_none("MLX_KV_BITS", "8")  # 8/4 = quantize KV cache; 0/false = fp16
 KV_GROUP_SIZE = int(os.environ.get("MLX_KV_GROUP_SIZE", "64"))
 KV_QUANT_START = int(os.environ.get("MLX_KV_QUANT_START", "0"))  # quantize from token N onward
 PREFILL_STEP = int(os.environ.get("MLX_PREFILL_STEP", "512"))  # prefill chunk (peak RAM ↓)
@@ -145,8 +169,8 @@ API_KEY = os.environ.get("EMBER_API_KEY") or None  # unset = no auth (default, l
 SHUTDOWN_TIMEOUT = float(os.environ.get("EMBER_SHUTDOWN_TIMEOUT", "30"))  # s to drain on SIGTERM
 MAX_BODY_MB = float(os.environ.get("EMBER_MAX_BODY_MB", "32"))  # request body cap
 MAX_BODY_BYTES = int(MAX_BODY_MB * 1024 * 1024)
-ALLOW_IMAGE_URLS = os.environ.get("EMBER_ALLOW_IMAGE_URLS", "0") not in ("0", "false", "")
-ALLOW_IMAGE_PATHS = os.environ.get("EMBER_ALLOW_IMAGE_PATHS", "0") not in ("0", "false", "")
+ALLOW_IMAGE_URLS = _env_bool("EMBER_ALLOW_IMAGE_URLS", False)
+ALLOW_IMAGE_PATHS = _env_bool("EMBER_ALLOW_IMAGE_PATHS", False)
 IMAGE_FETCH_TIMEOUT_S = 10
 METRICS_LOG_PATH = os.environ.get(
     "EMBER_METRICS_LOG", os.path.expanduser("~/.cache/ember/metrics.jsonl")
@@ -165,7 +189,7 @@ SIZES_CACHE_PATH = os.environ.get(
 if SIZES_CACHE_PATH in ("0", "false", ""):  # opt out of cross-restart size persistence
     SIZES_CACHE_PATH = None
 # ---- emergency memory watchdog (issue #93): whole-machine pressure, not just our budget ----
-MEMWATCH_ENABLED = os.environ.get("MLX_MEMWATCH", "1") not in ("0", "false", "")
+MEMWATCH_ENABLED = _env_bool("MLX_MEMWATCH", True)
 MEMWATCH_INTERVAL_S = float(os.environ.get("MLX_MEMWATCH_INTERVAL_S", "2.5"))
 EMERGENCY_FREE_GB = float(os.environ.get("MLX_EMERGENCY_FREE_GB", "1.5"))  # trigger: free RAM below
 EMERGENCY_PAGEOUT_RATE = float(
@@ -834,6 +858,34 @@ def _num_ctx_error(num_ctx, n_prompt_tokens):
     return None
 
 
+def _validate_generation_params(body):
+    """Checks the request-supplied bits that would otherwise blow up deep in the GPU
+    worker as an opaque 500 -- `seed` hits `int(seed)` in _run_chat/_gen_vlm, and
+    `logit_bias` keys hit `int(k)` in _logits_processors. Called from the handler
+    thread before a job is ever queued, so a bad value comes back as a 400 instead of
+    tearing down a job the worker already started (issue #82). Returns an error
+    message string, or None if `body` is fine."""
+    if "seed" in body and body["seed"] is not None:
+        try:
+            int(body["seed"])
+        except (TypeError, ValueError):
+            return f"'seed' must be an integer, got {body['seed']!r}"
+    bias = body.get("logit_bias")
+    if bias is not None:
+        if not isinstance(bias, dict):
+            return f"'logit_bias' must be an object mapping token ids to bias values, got {bias!r}"
+        for k, v in bias.items():
+            try:
+                int(k)
+                float(v)
+            except (TypeError, ValueError):
+                return (
+                    "'logit_bias' must map token id strings to numeric bias values, "
+                    f"got {k!r}: {v!r}"
+                )
+    return None
+
+
 def _sampler(name, body):
     p = CFG.get(name, {}).get("params", {})
     return make_sampler(
@@ -1174,12 +1226,13 @@ def _loaded():
         ac_loaded, em_loaded = _ac["model"] is not None, _em["model"] is not None
         ac_idle_s = round(now - _ac["last"]) if ac_loaded else None
         ac_ka = _ac["ka"] if ac_loaded else None
+        ac_cached_tokens = len(_ac["pctoks"]) if _ac.get("pctoks") else 0
         em_idle_s = round(now - _em["last"]) if em_loaded else None
         em_ka = _em["ka"] if em_loaded else None
     return {
         "chat": chat,
         "autocomplete": AC_NAME if ac_loaded else None,
-        "autocomplete_cached_tokens": len(_ac["pctoks"]) if _ac.get("pctoks") else 0,
+        "autocomplete_cached_tokens": ac_cached_tokens,
         "autocomplete_idle_s": ac_idle_s,
         "autocomplete_keep_alive_s": ac_ka,
         "embed": EM_NAME if em_loaded else None,
@@ -1789,11 +1842,21 @@ def _worker():
 
 def _wait_for_drain(timeout):
     """Blocks (up to `timeout` s) until the GPU queue is empty and the worker is idle.
-    Used on SIGTERM to let an in-flight generation finish before the process exits."""
+    Used on SIGTERM to let an in-flight generation finish before the process exits.
+
+    _worker dequeues (`_q.get()`) *before* marking itself busy (`_worker_busy.set()`), so
+    a check landing in that gap would see "queue empty + worker idle" and could report
+    drained while a job is about to start running. A single re-check after a short sleep
+    closes the gap: it's long enough for the worker to reach `_worker_busy.set()` (a
+    couple of bytecodes after `_q.get()` returns) but short enough not to matter against
+    `timeout` (issue #82)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if _q.empty() and not _worker_busy.is_set():
-            return True
+            time.sleep(0.05)
+            if _q.empty() and not _worker_busy.is_set():
+                return True
+            continue
         time.sleep(0.1)
     return False
 
@@ -2065,6 +2128,9 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---- chat (multi-runner) ----
     def _chat(self, body):
+        err = _validate_generation_params(body)
+        if err:
+            return self._error(400, err, err_code="invalid_request")
         name = body.get("model", "")
         if name == "warm":  # alias: whatever chat model is currently loaded
             name = _warm_model()
