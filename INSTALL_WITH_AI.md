@@ -44,7 +44,9 @@ ember --help                        # confirm it installed
 
 Tell the user their **total RAM** (from Step 1) and that models must fit alongside ~3–4 GB
 of system/headroom. Show this menu and let them pick — recommend by RAM, but they decide.
-Measured on an Apple M5 24 GB (tok/s · RAM):
+Speeds below were **measured on one specific machine (Apple M5, 24 GB)** — tell the user
+that tok/s on their chip will differ, but the RAM column and the relative ranking carry
+over (tok/s · RAM):
 
 | Pick | Model (`mlx` repo) | tok/s | RAM | Good for |
 |---|---|--:|--:|---|
@@ -55,9 +57,17 @@ Measured on an Apple M5 24 GB (tok/s · RAM):
 | 🟡 quality | `mlx-community/Qwen2.5-Coder-32B-Instruct-3bit` | 8 | 15 GB | strong code, slower (dense) |
 | 👁 vision | `mlx-community/Qwen2.5-VL-3B-Instruct-4bit` | — | 2 GB | image input (needs `[vision]`) |
 
-Rules of thumb to share: MoE models (DeepSeek-Coder, Qwen3-30B-A3B) are much faster per GB;
-8 GB RAM → stick to the 🟢 light row; 24 GB → one 🟡 model fits comfortably. Multiple models
-can be listed — Ember loads them on demand and keeps as many hot as RAM allows.
+Rules of thumb to share: MoE models (DeepSeek-Coder, Qwen3-30B-A3B) are much faster per GB.
+Recommend by the user's RAM tier:
+
+- **8 GB** → one 🟢 light model only (Ember's defaults keep a single model hot on this tier).
+- **16 GB** → 🟢 light models comfortably, or the 🟢 fast-MoE as the single main model.
+- **24–32 GB** → one 🟡 model fits comfortably alongside the small always-on models.
+- **64 GB+** → 🟡 models at higher quants (4/6-bit) and several models hot at once.
+
+Multiple models can be listed — Ember loads them on demand, keeps as many hot as RAM
+allows, and [scales its memory defaults to the machine](docs/memory.md#ram-profiles-auto-defaults),
+so no manual tuning is needed at any tier.
 
 Ask which model(s) they want (and whether they want vision and a code-autocomplete model).
 

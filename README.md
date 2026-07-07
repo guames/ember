@@ -67,15 +67,21 @@ backend…). Ember's niche is being the **unified, memory-adaptive** one for a s
   nudging.
 - 🛠️ **Full OpenAI surface.** Tools/function-calling (`tool_choice` incl. forced),
   streaming, `stop`, `seed`, repetition/presence/frequency penalties, `logit_bias`.
-- 💾 **Tuned for 24 GB.** 8-bit KV cache, chunked prefill (lower peak RAM), wired-memory
-  pinning for consistent speed near the limit.
+- 💾 **Adapts to your Mac's RAM.** Memory-policy defaults scale with total RAM — from an
+  8 GB Air to a 128 GB Studio (see [RAM profiles](docs/memory.md#ram-profiles-auto-defaults)) —
+  and every knob is an env var if you want to tune it yourself. 8-bit KV cache, chunked
+  prefill (lower peak RAM), wired-memory pinning for consistent speed near the limit.
 
 ---
 
 ## Benchmarks
 
-Measured on an **Apple M5, 24 GB** (MLX). Generation is memory-bandwidth bound, so MoE
-models fly while dense 30B-class models trade speed for quality:
+All numbers below were measured on **one machine: an Apple M5 with 24 GB** of unified
+memory (MLX). Generation is memory-bandwidth bound, so the *relative* conclusions (MoE
+models fly, dense 30B-class models trade speed for quality) should hold on any M-series
+chip — but absolute tok/s and how much fits in RAM will differ on your Mac.
+Benchmarked a different config? Contribute your numbers in
+[#84](https://github.com/guames/ember/issues/84).
 
 | Model | Quant | tok/s · MLX | tok/s · Ollama | MLX faster | RAM · MLX | RAM · Ollama | MLX lighter |
 |---|---|--:|--:|--:|--:|--:|--:|
@@ -99,10 +105,20 @@ prompt); chunked prefill drops peak RAM ~19 %; 8-bit KV cache is ~2× smaller.
 
 ### 0. Requirements
 
-- A Mac with **Apple Silicon** (M1 or newer). Ember does not run on Intel Macs.
+- A Mac with **Apple Silicon** (any M-series chip, M1 or newer). Ember does not run on
+  Intel Macs.
 - **Python 3.10+** — check with `python3 --version`. (Get it from [python.org](https://www.python.org/downloads/macos/) or `brew install python`.)
-- Free disk + RAM for the models you pick (8 GB works for small models; 24 GB+ for the
-  big ones — see [Benchmarks](#benchmarks)).
+- Free disk + RAM for the models you pick. Any RAM size works — Ember's memory defaults
+  [adapt to your machine](docs/memory.md#ram-profiles-auto-defaults). As a rule of thumb:
+
+  | Your RAM | Comfortable models |
+  |---|---|
+  | 8 GB | one small model (3–4 GB resident), e.g. Qwen3-8B 3-bit |
+  | 16 GB | a light chat model + autocomplete + embeddings |
+  | 24–32 GB | a 30B-class MoE or 32B 3-bit, plus the small always-on models |
+  | 64 GB+ | several big models hot at once, higher quants (4/6-bit) |
+
+  See [Benchmarks](#benchmarks) for measured speed/RAM per model (on a 24 GB machine).
 
 ### 1. Install
 
@@ -236,8 +252,8 @@ and a latency histogram, reset on restart.
 | `EMBER_API_KEY` | off | require `Authorization: Bearer <key>` on every route except `/health` |
 | `EMBER_SHUTDOWN_TIMEOUT` | `30` | seconds to drain the in-flight job on `SIGTERM` |
 | `EMBER_METRICS_LOG` | `~/.cache/ember/metrics.jsonl` | JSONL request log path (`0` disables it) |
-| `MLX_MAX_RUNNERS` | auto by RAM (`4` on 24GB) | max models hot at once |
-| `MLX_MIN_FREE_GB` | auto by RAM (`2.0` on 24GB) | evict a model below this free RAM |
+| `MLX_MAX_RUNNERS` | auto by [RAM profile](docs/memory.md#ram-profiles-auto-defaults) | max models hot at once |
+| `MLX_MIN_FREE_GB` | auto by [RAM profile](docs/memory.md#ram-profiles-auto-defaults) | evict a model below this free RAM |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | drop KV caches below this free RAM |
 | `MLX_IDLE_TIMEOUT` | `300` | idle seconds before unloading a chat model |
 | `MLX_MAX_QUEUE` | `32` | queue depth before returning 503 |

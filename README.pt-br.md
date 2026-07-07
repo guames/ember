@@ -69,15 +69,23 @@ LM Studio…). O nicho do Ember é ser o **unificado e adaptativo de memória** 
   empurrãozinho no prompt.
 - 🛠️ **Superfície completa da OpenAI.** Tools/function-calling (`tool_choice` incl. forçado),
   streaming, `stop`, `seed`, penalidades de repetição/presença/frequência, `logit_bias`.
-- 💾 **Afinado para 24 GB.** Cache KV de 8 bits, prefill em blocos (menor pico de RAM), pinagem
-  de memória wired para velocidade consistente perto do limite.
+- 💾 **Se adapta à RAM do seu Mac.** Os defaults da política de memória escalam com a RAM
+  total — de um Air de 8 GB a um Studio de 128 GB (veja os
+  [perfis de RAM](docs/memory.md#ram-profiles-auto-defaults)) — e cada botão é uma variável
+  de ambiente, se você quiser afinar por conta própria. Cache KV de 8 bits, prefill em
+  blocos (menor pico de RAM), pinagem de memória wired para velocidade consistente perto do
+  limite.
 
 ---
 
 ## Benchmarks
 
-Medido num **Apple M5, 24 GB** (MLX). A geração é limitada pela banda de memória, então modelos
-MoE voam enquanto os densos da classe 30B trocam velocidade por qualidade:
+Todos os números abaixo foram medidos numa **única máquina: um Apple M5 com 24 GB** de
+memória unificada (MLX). A geração é limitada pela banda de memória, então as conclusões
+*relativas* (modelos MoE voam, os densos da classe 30B trocam velocidade por qualidade)
+devem valer em qualquer chip da linha M — mas o tok/s absoluto e o que cabe na RAM vão
+variar no seu Mac. Fez benchmark numa outra config? Contribua com seus números na
+[#84](https://github.com/guames/ember/issues/84).
 
 | Modelo | Quant | tok/s · MLX | tok/s · Ollama | MLX mais rápido | RAM · MLX | RAM · Ollama | MLX mais leve |
 |---|---|--:|--:|--:|--:|--:|--:|
@@ -101,10 +109,22 @@ Ollama) em [docs/benchmarks.md](docs/benchmarks.md).
 
 ### 0. Requisitos
 
-- Um Mac com **Apple Silicon** (M1 ou mais novo). O Ember não roda em Macs Intel.
+- Um Mac com **Apple Silicon** (qualquer chip da linha M, M1 ou mais novo). O Ember não
+  roda em Macs Intel.
 - **Python 3.10+** — confira com `python3 --version`. (Pegue em [python.org](https://www.python.org/downloads/macos/) ou `brew install python`.)
-- Disco + RAM livres para os modelos que você escolher (8 GB dá conta de modelos pequenos; 24 GB+
-  para os grandes — veja [Benchmarks](#benchmarks)).
+- Disco + RAM livres para os modelos que você escolher. Qualquer quantidade de RAM
+  funciona — os defaults de memória do Ember
+  [se adaptam à sua máquina](docs/memory.md#ram-profiles-auto-defaults). Como regra de bolso:
+
+  | Sua RAM | Modelos confortáveis |
+  |---|---|
+  | 8 GB | um modelo pequeno (3–4 GB residentes), ex.: Qwen3-8B 3-bit |
+  | 16 GB | um chat leve + autocomplete + embeddings |
+  | 24–32 GB | um MoE da classe 30B ou um 32B 3-bit, mais os modelos pequenos sempre quentes |
+  | 64 GB+ | vários modelos grandes quentes ao mesmo tempo, quants maiores (4/6-bit) |
+
+  Veja os [Benchmarks](#benchmarks) para velocidade/RAM medidas por modelo (numa máquina
+  de 24 GB).
 
 ### 1. Instalação
 
@@ -223,8 +243,8 @@ Os comandos de gerência falam com um servidor em execução (`--url`, padrão
 | Variável | Padrão | Significado |
 |---|---|---|
 | `MLX_ROUTER_PORT` / `MLX_ROUTER_HOST` | `8000` / `127.0.0.1` | endereço de bind |
-| `MLX_MAX_RUNNERS` | auto pela RAM (`4` em 24GB) | máximo de modelos quentes ao mesmo tempo |
-| `MLX_MIN_FREE_GB` | auto pela RAM (`2.0` em 24GB) | evicta um modelo abaixo desta RAM livre |
+| `MLX_MAX_RUNNERS` | auto pelo [perfil de RAM](docs/memory.md#ram-profiles-auto-defaults) | máximo de modelos quentes ao mesmo tempo |
+| `MLX_MIN_FREE_GB` | auto pelo [perfil de RAM](docs/memory.md#ram-profiles-auto-defaults) | evicta um modelo abaixo desta RAM livre |
 | `MLX_MIN_FREE_CACHE_GB` | `1.0` | dropa caches KV abaixo desta RAM livre |
 | `MLX_IDLE_TIMEOUT` | `300` | segundos de ociosidade antes de descarregar um modelo de chat |
 | `MLX_MAX_QUEUE` | `32` | profundidade da fila antes de retornar 503 |
