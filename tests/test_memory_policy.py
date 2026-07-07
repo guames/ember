@@ -17,8 +17,10 @@ def test_estimate_prefers_measured():
     assert mp.estimate_size_gb(7.5, 9.0, [13.0], 8.0) == 7.5
 
 
-def test_estimate_falls_back_to_disk():
-    assert mp.estimate_size_gb(None, 9.0, [13.0], 8.0) == 9.0
+def test_estimate_falls_back_to_disk_with_safety_margin():
+    """On-disk weight size alone undercounts true resident size (activations/working-set
+    overhead), so it's inflated by DISK_ESTIMATE_MARGIN (issue #32)."""
+    assert mp.estimate_size_gb(None, 9.0, [13.0], 8.0) == 9.0 * mp.DISK_ESTIMATE_MARGIN
 
 
 def test_estimate_falls_back_to_largest_hot():

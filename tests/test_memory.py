@@ -109,3 +109,39 @@ def test_estimate_default_when_nothing_known(clean, monkeypatch):
     monkeypatch.setattr(server, "CFG", {}, raising=False)
     monkeypatch.setattr(server, "DEFAULT_EST_GB", 8.0)
     assert server._estimate_size_gb("unknown") == 8.0
+
+
+# ---------------------------------------------------------------- sizes cache persistence (#32)
+def test_save_sizes_then_load_round_trips(clean, monkeypatch, tmp_path):
+    path = tmp_path / "sizes.json"
+    monkeypatch.setattr(server, "SIZES_CACHE_PATH", str(path))
+    server._sizes["big"] = 13.0
+    server._sizes["small"] = 3.0
+    server._save_sizes()
+    assert server._load_sizes() == {"big": 13.0, "small": 3.0}
+
+
+def test_load_sizes_missing_file_returns_empty(clean, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "SIZES_CACHE_PATH", str(tmp_path / "does-not-exist.json"))
+    assert server._load_sizes() == {}
+
+
+def test_load_sizes_disabled_returns_empty(clean, monkeypatch, tmp_path):
+    path = tmp_path / "sizes.json"
+    path.write_text('{"m": 1.0}')
+    monkeypatch.setattr(server, "SIZES_CACHE_PATH", None)
+    assert server._load_sizes() == {}
+
+
+def test_load_sizes_corrupt_file_is_ignored(clean, monkeypatch, tmp_path):
+    path = tmp_path / "sizes.json"
+    path.write_text("not json")
+    monkeypatch.setattr(server, "SIZES_CACHE_PATH", str(path))
+    assert server._load_sizes() == {}
+
+
+def test_save_sizes_disabled_is_a_noop(clean, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "SIZES_CACHE_PATH", None)
+    server._sizes["m"] = 1.0
+    server._save_sizes()  # must not raise, and must not create anything
+    assert list(tmp_path.iterdir()) == []

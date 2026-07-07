@@ -29,13 +29,17 @@ machine overflows RAM *during* the load, before any reactive eviction can fire. 
 prevents this by making room **before** the memory-spiking load:
 
 1. **Estimate** the incoming model's resident size (`memory_policy.estimate_size_gb`):
-   a real measurement from a prior load this session → its on-disk `.safetensors` size →
-   the largest hot model → `MLX_DEFAULT_EST_GB` (8 GB).
+   a real measurement from a prior load (this session, or persisted from an earlier run —
+   see below) → its on-disk `.safetensors` size inflated by `DISK_ESTIMATE_MARGIN` (1.15×,
+   since weights-on-disk alone undercounts activations/working-set overhead) → the largest
+   hot model → `MLX_DEFAULT_EST_GB` (8 GB).
 2. **Plan evictions** (`memory_policy.plan_make_room`): evict LRU chat models — never the
    target — until the budget holds: `free − estimate ≥ MLX_MIN_FREE_GB` **and**
    `runners ≤ MLX_MAX_RUNNERS`. The plan simulates the RAM freed by each eviction, so it
    stops as soon as the model will fit.
-3. **Load** and measure the real size (remembered for the next estimate).
+3. **Load** and measure the real size (remembered for the next estimate, and persisted to
+   `EMBER_SIZES_CACHE` so the *first* load after a restart is already as accurate as every
+   load after it — not just a disk-size guess).
 
 Each eviction logs, e.g.:
 
@@ -90,6 +94,7 @@ keep-alive.
 | `MLX_WIRED_LIMIT_GB` | auto by RAM | wired-memory ceiling (`total − headroom`; headroom scales with RAM, `5GB` on 24GB) |
 | `MLX_CACHE_LIMIT_GB` | off | cap the MLX buffer pool |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse (see [prompt-cache.md](prompt-cache.md)) |
+| `EMBER_SIZES_CACHE` | `~/.cache/ember/sizes.json` | persisted measured model sizes across restarts (`0` disables) |
 
 ## Inspecting & nudging it
 

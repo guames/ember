@@ -13,15 +13,19 @@ Splitting it out lets the package server (`server.py`) and the PROD router
 chat models); `free` is free RAM in GB, or None when it can't be measured.
 """
 
+DISK_ESTIMATE_MARGIN = 1.15  # on-disk weight size undercounts activations/working-set overhead
+
 
 def estimate_size_gb(measured, disk, hot_sizes, default_est):
     """Best estimate (GB) of a model's resident size BEFORE loading it: a real
-    measurement from a prior load this session, else its on-disk weight size, else
-    the largest hot model (or `default_est` when nothing is hot)."""
+    measurement from a prior load (this session, or persisted from an earlier one), else
+    its on-disk weight size inflated by `DISK_ESTIMATE_MARGIN` (weights-on-disk alone
+    undercounts true resident size), else the largest hot model (or `default_est` when
+    nothing is hot)."""
     if measured is not None:
         return measured
     if disk is not None:
-        return disk
+        return disk * DISK_ESTIMATE_MARGIN
     return max(hot_sizes) if hot_sizes else default_est
 
 
