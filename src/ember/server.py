@@ -50,6 +50,7 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
       EMBER_API_KEY(off) EMBER_SHUTDOWN_TIMEOUT(30)
       EMBER_METRICS_LOG(~/.cache/ember/metrics.jsonl, "0" to disable)
+      EMBER_SIZES_CACHE(~/.cache/ember/sizes.json, "0" to disable)
 
 Ops: GET /health is an unauthenticated 200 for process supervisors (LaunchAgent, systemd).
      EMBER_API_KEY, when set, requires `Authorization: Bearer <key>` on every other route
@@ -146,6 +147,11 @@ if METRICS_LOG_PATH in (
     "",
 ):  # opt out of the JSONL log (the /metrics counters still work)
     METRICS_LOG_PATH = None
+SIZES_CACHE_PATH = os.environ.get(
+    "EMBER_SIZES_CACHE", os.path.expanduser("~/.cache/ember/sizes.json")
+)
+if SIZES_CACHE_PATH in ("0", "false", ""):  # opt out of cross-restart size persistence
+    SIZES_CACHE_PATH = None
 
 # ---- shutdown state (set by the SIGTERM handler; read by do_POST and the worker) ----
 _shutting_down = threading.Event()
@@ -278,10 +284,43 @@ def _tune_memory():
         print(f"[router] mem tuning failed (continuing without): {e}", flush=True)
 
 
+def _load_sizes():
+    """Best-effort load of `_sizes` persisted by a prior run (issue #32), so admission
+    control is accurate from the very first request after a restart, not just after
+    every model has been loaded once this session."""
+    if not SIZES_CACHE_PATH:
+        return {}
+    try:
+        with open(SIZES_CACHE_PATH) as f:
+            data = json.load(f)
+        return {k: float(v) for k, v in data.items() if isinstance(v, (int, float))}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:  # noqa: BLE001
+        print(f"[router] sizes cache load failed (continuing without): {e}", flush=True)
+        return {}
+
+
+def _save_sizes():
+    """Best-effort persist of the current `_sizes` dict to SIZES_CACHE_PATH."""
+    if not SIZES_CACHE_PATH:
+        return
+    try:
+        os.makedirs(os.path.dirname(SIZES_CACHE_PATH), exist_ok=True)
+        tmp = SIZES_CACHE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_sizes, f)
+        os.replace(tmp, SIZES_CACHE_PATH)
+    except Exception as e:  # noqa: BLE001
+        print(f"[router] sizes cache save failed (continuing): {e}", flush=True)
+
+
 # ---- model state (mutated ONLY by the worker; _reg_lock guards the structure) ----
 _reg_lock = threading.Lock()
 _chat = {}  # name -> {model, tok, size_gb, last, ka}
-_sizes = {}  # name -> measured resident size_gb from a prior load (for pre-load estimates)
+_sizes = (
+    _load_sizes()
+)  # name -> measured resident size_gb from a prior load (this run or persisted)
 _ac = {"model": None, "tok": None, "pc": None, "pctoks": None}  # autocomplete (fixed)
 _em = {"model": None, "proc": None}  # embed (fixed)
 
@@ -493,6 +532,7 @@ def chat_model(name):
     mx.eval([v for _, v in tree_flatten(model.parameters())])  # materialize to measure
     size = _gb(mx.get_active_memory() - before)
     _sizes[name] = size  # remember the real size for the next admission estimate
+    _save_sizes()  # ...and persist it, so a restart doesn't lose it (issue #32)
     with _reg_lock:
         _chat[name] = {
             "model": model,
