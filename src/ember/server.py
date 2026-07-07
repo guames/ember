@@ -747,28 +747,45 @@ def _logits_processors(name, body):
 
 class _StopBuf:
     """Streaming-safe stop-sequence detection. Holds back a tail (up to maxlen-1
-    chars) before emitting, so a stop that crosses a token boundary doesn't leak."""
+    chars) before emitting, so a stop that crosses a token boundary doesn't leak.
+
+    Only rescans the tail window that could contain a *new* match (bounded by the
+    longest stop sequence) instead of the whole accumulator on every call, so
+    per-token cost stays constant instead of growing with generation length
+    (issue #54)."""
 
     def __init__(self, stops):
         self.stops = [s for s in stops if s]
         self.hold = max((len(s) for s in self.stops), default=0) - 1
         self.acc = ""
         self.sent = 0
+        self.checked = 0  # length of the acc prefix already confirmed stop-free
 
     @staticmethod
-    def earliest_stop(text, stops):
-        """Returns the index of the earliest stop sequence in text, or -1."""
+    def earliest_stop(text, stops, start=0):
+        """Returns the index of the earliest stop sequence in text at or after
+        `start`, or -1."""
         cut = -1
         for s in stops:
-            j = text.find(s)
+            j = text.find(s, start)
             if j != -1 and (cut == -1 or j < cut):
                 cut = j
         return cut
 
+    def scan(self, text):
+        """Appends text and returns the index of the earliest stop in the full
+        accumulator, or -1. Only rescans since `checked` (bounded by `hold`),
+        not the whole accumulator."""
+        self.acc += text
+        window_start = max(0, self.checked - self.hold)
+        cut = self.earliest_stop(self.acc, self.stops, window_start)
+        if cut == -1:
+            self.checked = len(self.acc)
+        return cut
+
     def push(self, text):
         """Adds new text. Returns (text_to_emit, stopped)."""
-        self.acc += text
-        cut = self.earliest_stop(self.acc, self.stops)
+        cut = self.scan(text)
         if cut != -1:  # stop found: cut at it
             emit = self.acc[self.sent : cut] if cut > self.sent else ""
             self.sent = len(self.acc)
@@ -821,6 +838,7 @@ def gen_fim(body):
         stops = [stops]
     sampler = make_sampler(temp=body.get("temperature", 0.1))
     cache, suffix, reused = _reuse_ac_cache(model, ptoks)
+    scanner = _StopBuf([*stops, "<|"])  # windowed marker/stop scan (issue #54)
     out, gen_ids = [], []
     for r in stream_generate(
         model,
@@ -834,8 +852,7 @@ def gen_fim(body):
     ):
         out.append(r.text)
         gen_ids.append(int(r.token))
-        text = "".join(out)
-        if "<|" in text or any(s and s in text for s in stops):
+        if scanner.scan(r.text) != -1:
             break
     _store_ac_cache(ptoks + gen_ids, cache)
     if reused:
@@ -1218,10 +1235,9 @@ def _run_chat(job):
                 if tools:
                     buf.append(r.text)
                     if stopbuf is not None:
-                        full = "".join(buf)
-                        cut = _StopBuf.earliest_stop(full, stopbuf.stops)
+                        cut = stopbuf.scan(r.text)
                         if cut != -1:
-                            buf = [full[:cut]]
+                            buf = [stopbuf.acc[:cut]]
                             stopped = True
                             break
                 elif stopbuf is not None:
