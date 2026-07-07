@@ -181,3 +181,61 @@ def test_wait_for_drain_true_when_queue_and_worker_idle():
     assert server._q.empty()
     assert not server._worker_busy.is_set()
     assert server._wait_for_drain(timeout=0.1) is True
+
+
+# ---------------------------------------------------------------- drain/dequeue race (issue #82)
+class _AlwaysEmptyQueue:
+    def empty(self):
+        return True
+
+
+def _fake_clock(step=0.02):
+    """Deterministic stand-in for time.monotonic: advances by `step` on every call, so a
+    timeout-bounded loop runs a fixed, fast number of iterations instead of spinning on
+    the real wall clock."""
+    state = {"t": 0.0}
+
+    def tick():
+        state["t"] += step
+        return state["t"]
+
+    return tick
+
+
+def test_wait_for_drain_rechecks_race_between_dequeue_and_busy_set(monkeypatch):
+    """_worker does `_q.get()` *then* `_worker_busy.set()` -- a drain check landing in
+    that gap sees "queue empty + worker idle" even though a job is about to run. Simulates
+    exactly that gap: the queue always looks empty, and _worker_busy.is_set() reads False
+    on the very first check (the race) but True on every read after (the job has started).
+    The old single-check implementation would have returned True here; the fix's re-check
+    must catch it and keep waiting instead."""
+    is_set_calls = {"n": 0}
+
+    class _BusyFromSecondCheck:
+        def is_set(self):
+            is_set_calls["n"] += 1
+            return is_set_calls["n"] > 1
+
+    monkeypatch.setattr(server, "_q", _AlwaysEmptyQueue())
+    monkeypatch.setattr(server, "_worker_busy", _BusyFromSecondCheck())
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)  # don't actually wait in the test
+    monkeypatch.setattr(server.time, "monotonic", _fake_clock())
+
+    assert server._wait_for_drain(timeout=0.3) is False
+    assert is_set_calls["n"] > 1  # the re-check ran at least once
+
+
+def test_wait_for_drain_recheck_confirms_true_drain(monkeypatch):
+    """A genuine drain (idle on the first check AND the re-check) still reports True --
+    the re-check doesn't turn into a second, redundant wait for the timeout."""
+
+    class _NeverBusy:
+        def is_set(self):
+            return False
+
+    monkeypatch.setattr(server, "_q", _AlwaysEmptyQueue())
+    monkeypatch.setattr(server, "_worker_busy", _NeverBusy())
+    monkeypatch.setattr(server.time, "sleep", lambda s: None)
+    monkeypatch.setattr(server.time, "monotonic", _fake_clock())
+
+    assert server._wait_for_drain(timeout=5) is True
