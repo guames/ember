@@ -1166,6 +1166,18 @@ def _loaded():
     }
 
 
+def _warm_model():
+    """Resolve the 'warm' model alias: the most recently used loaded chat model
+    (whatever was warmed last). Nothing loaded -> MLX_WARM_DEFAULT (env) when it
+    names a known model, else None — the caller answers 404. The router never
+    picks a model on its own: silently loading a 17G model is not a fallback."""
+    with _reg_lock:
+        if _chat:
+            return max(_chat.items(), key=lambda kv: kv[1]["last"])[0]
+    d = os.environ.get("MLX_WARM_DEFAULT")
+    return d if d in CFG else None
+
+
 def _mem():
     out = {}
     try:
@@ -1880,6 +1892,14 @@ class Handler(BaseHTTPRequestHandler):
     # ---- chat (multi-runner) ----
     def _chat(self, body):
         name = body.get("model", "")
+        if name == "warm":  # alias: whatever chat model is currently loaded
+            name = _warm_model()
+            if name is None:
+                return self._error(
+                    404,
+                    "alias 'warm': no chat model loaded (warm one up or set MLX_WARM_DEFAULT)",
+                    err_code="model_not_found",
+                )
         if name not in CFG:
             return self._error(404, f"unknown model '{name}'", err_code="model_not_found")
         job = _submit(P_CHAT, "chat", {"name": name, "body": body})

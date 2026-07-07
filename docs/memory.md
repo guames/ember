@@ -66,6 +66,15 @@ with the `keep_alive` field — a number of seconds or a string like `"30s"`, `"
 `"1h"` (`0`/negative = never expire). `ember ps` shows each model's idle time and
 keep-alive.
 
+### The `warm` model alias
+
+`model: "warm"` on `/v1/chat/completions` resolves to the **most recently used loaded
+chat model** — whatever you warmed last. Useful for clients that want "the current
+model" without hard-coding a name (e.g. pointing a fixed model slot of another tool at
+Ember). The response echoes the resolved model name. With nothing loaded, the request
+fails with a clear 404 rather than loading a model on its own; set `MLX_WARM_DEFAULT`
+to a known model name to opt in to a cold-start fallback.
+
 ## RAM profiles (auto defaults)
 
 Ember picks its out-of-the-box memory defaults from your Mac's **total RAM**
