@@ -91,6 +91,45 @@ def test_enforce_never_evicts_keep():
     assert "keep" not in victims and victims == ["other"]
 
 
+# ---------------------------------------------------------------- plan_emergency_evict (#93)
+def test_emergency_no_trigger_when_ram_and_pageout_both_fine():
+    models = _models(("a", 3.0, 1.0))
+    assert mp.plan_emergency_evict(10.0, 0.0, models, None, None, 1.5, 2.0, 50.0) == []
+
+
+def test_emergency_low_free_ram_alone_triggers():
+    models = _models(("a", 3.0, 1.0))
+    assert mp.plan_emergency_evict(1.0, 0.0, models, None, None, 1.5, 2.0, 50.0) == ["a"]
+
+
+def test_emergency_high_pageout_alone_triggers():
+    """Free RAM looks fine, but the kernel is already paging: the pageout signal must be
+    enough on its own to declare an emergency (issue #93 — free-RAM-only missed this)."""
+    models = _models(("a", 3.0, 1.0))
+    assert mp.plan_emergency_evict(10.0, 80.0, models, None, None, 1.5, 2.0, 50.0) == ["a"]
+
+
+def test_emergency_evicts_lru_incrementally_until_recovered():
+    models = _models(("old", 1.0, 1.0), ("mid", 1.0, 2.0), ("new", 1.0, 3.0))
+    # free=0.5, recover target=2.0: old(+1=1.5) not enough, mid(+1=2.5) reaches it, new spared
+    assert mp.plan_emergency_evict(0.5, 0.0, models, None, None, 1.5, 2.0, 50.0) == ["old", "mid"]
+
+
+def test_emergency_reaches_autocomplete_and_embed_only_after_chats():
+    models = _models(("a", 1.0, 1.0))
+    victims = mp.plan_emergency_evict(0.0, 0.0, models, 1.0, 1.0, 1.5, 2.5, 50.0)
+    assert victims == ["a", "autocomplete", "embed"]
+
+
+def test_emergency_never_evicts_unloaded_autocomplete_or_embed():
+    """ac_size_gb/em_size_gb of None means that slot isn't loaded -- it must never appear
+    as a victim even when the chat runners alone can't reach the recovery target."""
+    models = _models(("a", 1.0, 1.0))
+    victims = mp.plan_emergency_evict(0.0, 0.0, models, None, None, 1.5, 10.0, 50.0)
+    assert victims == ["a"]
+    assert "autocomplete" not in victims and "embed" not in victims
+
+
 # ---------------------------------------------------------------- order_cache_relief
 def _cache_models(*rows):
     return {name: {"last": last, "has_cache": hc} for name, hc, last in rows}

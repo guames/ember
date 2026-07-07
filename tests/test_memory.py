@@ -162,3 +162,79 @@ def test_save_sizes_disabled_is_a_noop(clean, monkeypatch, tmp_path):
     server._sizes["m"] = 1.0
     server._save_sizes()  # must not raise, and must not create anything
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------- emergency watchdog (#93)
+class _FakeSwap:
+    def __init__(self, sout):
+        self.sout = sout
+
+
+class _FakePsutil:
+    def __init__(self, sout):
+        self._sout = sout
+
+    def swap_memory(self):
+        return _FakeSwap(self._sout)
+
+
+@pytest.fixture
+def memwatch(clean, monkeypatch):
+    """Isolates _memwatch_tick from the real machine: fixed free RAM/pageout knobs, no
+    autocomplete/embed loaded, and a submitted-jobs spy in place of the real GPU queue."""
+    monkeypatch.setattr(server, "EMERGENCY_FREE_GB", 1.5)
+    monkeypatch.setattr(server, "EMERGENCY_RECOVER_FREE_GB", 2.0)
+    monkeypatch.setattr(server, "EMERGENCY_PAGEOUT_RATE", 50.0)
+    monkeypatch.setattr(server, "METRICS_LOG_PATH", None)
+    monkeypatch.setitem(server._ac, "model", None)
+    monkeypatch.setitem(server._em, "model", None)
+    submitted = []
+    monkeypatch.setattr(
+        server, "_submit", lambda prio, kind, payload: submitted.append((kind, payload))
+    )
+    return submitted
+
+
+def test_memwatch_tick_no_emergency_does_not_submit(memwatch, monkeypatch):
+    monkeypatch.setattr(server, "_free_gb", lambda: 10.0)
+    monkeypatch.setattr(server, "psutil", _FakePsutil(0))
+    server._memwatch_tick(None, None)
+    assert memwatch == []
+
+
+def test_memwatch_tick_low_free_ram_submits_emergency_evict(memwatch, monkeypatch):
+    _put("a", 3.0, last=1.0)
+    monkeypatch.setattr(server, "_free_gb", lambda: 0.5)
+    monkeypatch.setattr(server, "psutil", _FakePsutil(0))
+    server._memwatch_tick(None, None)
+    assert len(memwatch) == 1
+    kind, payload = memwatch[0]
+    assert kind == "emergency_evict"
+    assert payload["names"] == ["a"]
+
+
+def test_memwatch_tick_pageout_rate_computed_between_two_calls(memwatch, monkeypatch):
+    """sout is a cumulative byte counter; the MB/s rate must come from the delta between
+    two samples, not the raw counter, and must be enough on its own to trigger."""
+    monkeypatch.setattr(server, "_free_gb", lambda: 10.0)  # RAM looks fine throughout
+    monkeypatch.setattr(server, "psutil", _FakePsutil(0))
+    sout, t = server._memwatch_tick(None, None)  # first sample: no rate available yet
+    assert memwatch == []
+
+    # 200 MB paged out over 1s -> 200 MB/s, well above the 50 MB/s trigger.
+    monkeypatch.setattr(server, "psutil", _FakePsutil(200 * 1024**2))
+    monkeypatch.setattr(server.time, "monotonic", lambda: t + 1.0)
+    _put("a", 3.0, last=1.0)
+    server._memwatch_tick(sout, t)
+    assert len(memwatch) == 1
+    assert memwatch[0][0] == "emergency_evict"
+
+
+def test_memwatch_tick_never_evicts_unloaded_autocomplete_or_embed(memwatch, monkeypatch):
+    _put("a", 1.0, last=1.0)
+    monkeypatch.setattr(server, "_free_gb", lambda: 0.0)
+    monkeypatch.setattr(server, "psutil", _FakePsutil(0))
+    server._memwatch_tick(None, None)
+    assert len(memwatch) == 1
+    names = memwatch[0][1]["names"]
+    assert "autocomplete" not in names and "embed" not in names

@@ -160,6 +160,14 @@ SIZES_CACHE_PATH = os.environ.get(
 )
 if SIZES_CACHE_PATH in ("0", "false", ""):  # opt out of cross-restart size persistence
     SIZES_CACHE_PATH = None
+# ---- emergency memory watchdog (issue #93): whole-machine pressure, not just our budget ----
+MEMWATCH_ENABLED = os.environ.get("MLX_MEMWATCH", "1") not in ("0", "false", "")
+MEMWATCH_INTERVAL_S = float(os.environ.get("MLX_MEMWATCH_INTERVAL_S", "2.5"))
+EMERGENCY_FREE_GB = float(os.environ.get("MLX_EMERGENCY_FREE_GB", "1.5"))  # trigger: free RAM below
+EMERGENCY_PAGEOUT_RATE = float(
+    os.environ.get("MLX_EMERGENCY_PAGEOUT_RATE", "50")
+)  # trigger: swap pageout MB/s above
+EMERGENCY_RECOVER_FREE_GB = EMERGENCY_FREE_GB + 0.5  # hysteresis margin; fixed, not an env
 
 # ---- shutdown state (set by the SIGTERM handler; read by do_POST and the worker) ----
 _shutting_down = threading.Event()
@@ -474,6 +482,15 @@ def _estimate_size_gb(name):
     with _reg_lock:
         hot = [m["size_gb"] for m in _chat.values()]
     return memory_policy.estimate_size_gb(measured, disk, hot, DEFAULT_EST_GB)
+
+
+def _fixed_slot_size_gb(repo):
+    """Disk-based size estimate (GB) for the fixed autocomplete/embed slots, which — unlike
+    chat models — never get a measured resident size recorded. Good enough for the
+    emergency watchdog's recovery simulation; `None` when the weight dir can't be found."""
+    d = _weights_dir(repo)
+    disk = _dir_weight_gb(d) if d else None
+    return disk * memory_policy.DISK_ESTIMATE_MARGIN if disk is not None else None
 
 
 def _make_room(name, est):
@@ -1647,6 +1664,27 @@ def _run_evict(job):
         mx.reset_peak_memory()
 
 
+def _run_emergency_evict(job):
+    """Runs the emergency-evict plan chosen by _memwatch_tick (called only on the worker).
+    Wrapped in try/except (consistent with issue #71) so a bad target never leaves the
+    job's caller (the watchdog thread has no caller waiting on job.out) or the worker stuck."""
+    try:
+        names = job.payload["names"]
+        for n in names:
+            if n == "autocomplete":
+                _evict_ac()
+            elif n == "embed":
+                _evict_em()
+            elif n in _chat:
+                _evict(n)
+        gc.collect()
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        print(f"[router] EMERGENCY: evicted {names} (system memory pressure)", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[router] emergency evict failed: {e}", flush=True)
+
+
 def _dispatch(job):
     {
         "chat": _run_chat,
@@ -1655,6 +1693,7 @@ def _dispatch(job):
         "unload": _run_unload,
         "clear": _run_clear,
         "evict": _run_evict,
+        "emergency_evict": _run_emergency_evict,
     }[job.kind](job)
 
 
@@ -1718,6 +1757,68 @@ def _watchdog():
             )
         if expired or ac_expired or em_expired:
             _submit(P_SHORT, "evict", {"names": expired, "ac": ac_expired, "em": em_expired})
+
+
+def _memwatch_tick(prev_sout, prev_t):
+    """One sampling of the emergency watchdog (issue #93) — isolated so it's testable without
+    a running loop/thread. Unlike the idle-keepalive watchdog above, this reacts to *system*
+    memory pressure (another process, or this one already being resident) rather than our own
+    admission budget, which is only ever checked at load time. Returns the (sout, t) sample to
+    pass into the next call, so the pageout rate can be measured between ticks."""
+    now = time.monotonic()
+    free = _free_gb()
+    sout = psutil.swap_memory().sout
+    rate_mb_s = 0.0
+    if prev_sout is not None and prev_t is not None and now > prev_t:
+        rate_mb_s = max(0.0, (sout - prev_sout) / 1024**2 / (now - prev_t))
+    with _reg_lock:
+        chat_models = {n: {"last": m["last"], "size_gb": m["size_gb"]} for n, m in _chat.items()}
+        ac_loaded, em_loaded = _ac["model"] is not None, _em["model"] is not None
+    ac_size = _fixed_slot_size_gb(AC_REPO) if ac_loaded else None
+    em_size = _fixed_slot_size_gb(EM_REPO) if em_loaded else None
+    victims = memory_policy.plan_emergency_evict(
+        free,
+        rate_mb_s,
+        chat_models,
+        ac_size,
+        em_size,
+        EMERGENCY_FREE_GB,
+        EMERGENCY_RECOVER_FREE_GB,
+        EMERGENCY_PAGEOUT_RATE,
+    )
+    if victims:
+        print(
+            f"[router] EMERGENCY: memory pressure (free={free:.2f}GB, "
+            f"pageout={rate_mb_s:.1f}MB/s) -> evicting {victims}",
+            flush=True,
+        )
+        if METRICS_LOG_PATH:
+            _write_metrics_log(
+                json.dumps(
+                    {
+                        "ts": time.time(),
+                        "event": "emergency_evict",
+                        "free_gb": round(free, 2),
+                        "pageout_mb_s": round(rate_mb_s, 1),
+                        "victims": victims,
+                    }
+                )
+                + "\n"
+            )
+        _submit(P_SHORT, "emergency_evict", {"names": victims})
+    return sout, now
+
+
+def _memwatch():
+    """Watches whole-machine memory pressure and forces eviction even when nothing new is
+    being loaded — admission control (_make_room/_enforce_memory) only ever runs around a
+    load, so a model that's already resident can still get squeezed into swap by memory
+    pressure from elsewhere on the box (this happened for real on 2026-07-07: SIGABRT +
+    jetsam). Only runs when psutil is available, same guard as _free_gb."""
+    prev = (None, None)
+    while True:
+        time.sleep(MEMWATCH_INTERVAL_S)
+        prev = _memwatch_tick(*prev)
 
 
 def _error_obj(message, err_type="internal_error", err_code=None):
@@ -2114,6 +2215,8 @@ def serve(host=None, port=None):
     _tune_memory()
     threading.Thread(target=_worker, daemon=True).start()
     threading.Thread(target=_watchdog, daemon=True).start()
+    if psutil is not None and MEMWATCH_ENABLED:
+        threading.Thread(target=_memwatch, daemon=True).start()
     httpd = ThreadingHTTPServer((host, port), Handler)
     stop = threading.Event()
 

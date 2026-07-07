@@ -80,6 +80,52 @@ def plan_enforce(keep, free, models, min_free_gb, max_runners):
     return victims
 
 
+def plan_emergency_evict(
+    free_gb,
+    pageout_mb_s,
+    chat_models,
+    ac_size_gb,
+    em_size_gb,
+    trigger_free_gb,
+    recover_free_gb,
+    trigger_pageout_mb_s,
+):
+    """Reactive safety net for when the *whole machine* is under memory pressure, not just
+    this process's own admission budget (issue #93) -- proactive admission only ever runs
+    at load time, so a model that's already resident can still get squeezed into swap by
+    something else running on the box. Emergency is declared when EITHER signal fires:
+    `free_gb < trigger_free_gb` (RAM is nearly gone) OR `pageout_mb_s > trigger_pageout_mb_s`
+    (the kernel is already paging, before free RAM necessarily looks low). Returns `[]`
+    when neither is true.
+
+    Once triggered, evicts at least one victim -- chat models by LRU (`chat_models` is
+    `name -> {"last": float, "size_gb": float}`), then `"autocomplete"`, then `"embed"`
+    (only when their resident size is known, i.e. currently loaded) -- simulating
+    recovered RAM per victim, continuing until the simulated free RAM reaches
+    `recover_free_gb`. That target is set above `trigger_free_gb` (hysteresis) so eviction
+    doesn't stop right at the line and immediately re-trigger next tick. A pageout-only
+    trigger (free RAM already looks fine) still forces one eviction -- the whole point of
+    that signal is that free bytes alone can lag behind real pressure."""
+    if not (free_gb < trigger_free_gb or pageout_mb_s > trigger_pageout_mb_s):
+        return []
+    candidates = sorted(chat_models, key=lambda n: chat_models[n]["last"])
+    sizes = {n: chat_models[n]["size_gb"] for n in candidates}
+    if ac_size_gb is not None:
+        candidates.append("autocomplete")
+        sizes["autocomplete"] = ac_size_gb
+    if em_size_gb is not None:
+        candidates.append("embed")
+        sizes["embed"] = em_size_gb
+    victims = []
+    cur_free = free_gb
+    for name in candidates:
+        victims.append(name)
+        cur_free += sizes[name]
+        if cur_free >= recover_free_gb:
+            break
+    return victims
+
+
 def scale_defaults(total_gb):
     """Derive memory-policy defaults from total system RAM (GB).
 

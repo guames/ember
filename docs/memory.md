@@ -58,6 +58,32 @@ This is much cheaper: the weights stay hot, and the only cost is reprocessing th
 conversation's prompt next turn (see [prompt-cache.md](prompt-cache.md)). The current
 request's own cache is the last to go.
 
+## Emergency memory watchdog
+
+Everything above only runs around a *load* — proactive admission decides before loading,
+the post-load safety net runs right after. Neither reacts once a model is already sitting
+resident and something else on the machine (another app, a second Ember instance, the OS
+itself) starts eating RAM. That gap is real: it caused a SIGABRT + jetsam kill in
+production. A background thread closes it by polling **system-wide** memory pressure —
+independent of Ember's own admission budget — every `MLX_MEMWATCH_INTERVAL_S` seconds
+(default 2.5s):
+
+- **Trigger** — an emergency is declared when **either** signal fires: free RAM drops
+  below `MLX_EMERGENCY_FREE_GB` (default 1.5 GB), **or** the kernel's swap pageout rate
+  exceeds `MLX_EMERGENCY_PAGEOUT_RATE` MB/s (default 50). The pageout signal catches
+  pressure that free-RAM-alone can miss or lag behind (macOS's memory compressor can keep
+  "free" looking fine while the kernel is already paging).
+- **Eviction** (`memory_policy.plan_emergency_evict`) — LRU chat models first, then the
+  pinned autocomplete slot, then the pinned embed slot (only once the chat runners are
+  exhausted), stopping once simulated free RAM recovers past `MLX_EMERGENCY_FREE_GB + 0.5`
+  (fixed hysteresis margin, not configurable) — so eviction doesn't stop right at the
+  trigger line and immediately fire again next tick.
+- Every emergency eviction prints loudly and, when `EMBER_METRICS_LOG` is enabled, appends
+  a JSONL line (`event: "emergency_evict"`) alongside the normal request metrics.
+- Set `MLX_MEMWATCH=0` to disable the watchdog entirely (e.g. if you're running your own
+  external memory monitor). It only starts when `psutil` is installed, same as the rest of
+  the system-memory reporting.
+
 ## keep_alive & idle unload
 
 Each chat model has a keep-alive. After `MLX_IDLE_TIMEOUT` seconds (default 300) idle, an
@@ -125,6 +151,10 @@ please report it in [#84](https://github.com/guames/ember/issues/84).
 | `MLX_CACHE_LIMIT_GB` | off | cap the MLX buffer pool |
 | `MLX_PROMPT_CACHE` | `1` | prefix KV-cache reuse (see [prompt-cache.md](prompt-cache.md)) |
 | `EMBER_SIZES_CACHE` | `~/.cache/ember/sizes.json` | persisted measured model sizes across restarts (`0` disables) |
+| `MLX_MEMWATCH` | `1` | [emergency watchdog](#emergency-memory-watchdog) for whole-machine memory pressure (`0` disables) |
+| `MLX_MEMWATCH_INTERVAL_S` | `2.5` | how often the emergency watchdog samples free RAM/pageout |
+| `MLX_EMERGENCY_FREE_GB` | `1.5` | emergency trigger: evict when free RAM drops below this |
+| `MLX_EMERGENCY_PAGEOUT_RATE` | `50` | emergency trigger: evict when swap pageout exceeds this (MB/s) |
 
 ## Inspecting & nudging it
 
