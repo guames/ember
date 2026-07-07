@@ -1624,27 +1624,30 @@ def _run_embed(job):
 
 
 def _run_unload(job):
-    target = job.payload["target"]
-    freed = []
-    if target in ("chat", "all"):
-        for n in list(_chat):
-            _evict(n)
-            freed.append(n)
-    if target == "all":
-        if _ac["model"] is not None:
-            _evict_ac()
-            freed.append(AC_NAME)
-        if _em["model"] is not None:
-            _evict_em()
-            freed.append(EM_NAME)
-    if target not in ("chat", "all") and target in _chat:
-        _evict(target)
-        freed.append(target)
-    gc.collect()
-    mx.clear_cache()
-    mx.reset_peak_memory()
-    print(f"[router] unload({target}) -> freed {freed or 'nothing'}", flush=True)
-    job.out.put(("result", freed))
+    try:
+        target = job.payload["target"]
+        freed = []
+        if target in ("chat", "all"):
+            for n in list(_chat):
+                _evict(n)
+                freed.append(n)
+        if target == "all":
+            if _ac["model"] is not None:
+                _evict_ac()
+                freed.append(AC_NAME)
+            if _em["model"] is not None:
+                _evict_em()
+                freed.append(EM_NAME)
+        if target not in ("chat", "all") and target in _chat:
+            _evict(target)
+            freed.append(target)
+        gc.collect()
+        mx.clear_cache()
+        mx.reset_peak_memory()
+        print(f"[router] unload({target}) -> freed {freed or 'nothing'}", flush=True)
+        job.out.put(("result", freed))
+    except Exception as e:  # noqa: BLE001
+        job.out.put(("error", str(e)))
 
 
 def _run_clear(job):
@@ -1652,61 +1655,69 @@ def _run_clear(job):
     'context' = drops the prompt cache (conversation KV) of all runners; the model stays
     hot and the next call reprocesses the prompt. 'cache' = empties the MLX buffer pool
     (mx.clear_cache) and resets the peak. 'all' = both."""
-    target = job.payload["target"]
-    cleared = []
-    if target in ("context", "all"):
-        with _reg_lock:
-            names = [n for n, m in _chat.items() if any(s["pc"] is not None for s in m["slots"])]
-            for n in names:
-                for s in _chat[n]["slots"]:
-                    s["pc"] = s["pctoks"] = None
-            ac_cleared = _ac["pc"] is not None
+    try:
+        target = job.payload["target"]
+        cleared = []
+        if target in ("context", "all"):
+            with _reg_lock:
+                names = [
+                    n for n, m in _chat.items() if any(s["pc"] is not None for s in m["slots"])
+                ]
+                for n in names:
+                    for s in _chat[n]["slots"]:
+                        s["pc"] = s["pctoks"] = None
+                ac_cleared = _ac["pc"] is not None
+                if ac_cleared:
+                    _ac["pc"] = _ac["pctoks"] = None
+            if names:
+                cleared.append("prompt-cache: " + ", ".join(names))
             if ac_cleared:
-                _ac["pc"] = _ac["pctoks"] = None
-        if names:
-            cleared.append("prompt-cache: " + ", ".join(names))
-        if ac_cleared:
-            cleared.append("prompt-cache: autocomplete")
-        gc.collect()
-    if target in ("cache", "all"):
-        mx.clear_cache()
-        mx.reset_peak_memory()
-        cleared.append("mlx-buffer-pool")
-    print(f"[ember] clear({target}) -> {cleared or 'nothing'}", flush=True)
-    job.out.put(("result", cleared))
+                cleared.append("prompt-cache: autocomplete")
+            gc.collect()
+        if target in ("cache", "all"):
+            mx.clear_cache()
+            mx.reset_peak_memory()
+            cleared.append("mlx-buffer-pool")
+        print(f"[ember] clear({target}) -> {cleared or 'nothing'}", flush=True)
+        job.out.put(("result", cleared))
+    except Exception as e:  # noqa: BLE001
+        job.out.put(("error", str(e)))
 
 
 def _run_evict(job):
-    now = time.monotonic()
-    with _reg_lock:
-        due = [
-            n
-            for n in job.payload["names"]
-            if n in _chat and _chat[n]["ka"] >= 0 and now - _chat[n]["last"] > _chat[n]["ka"]
-        ]
-        ac_due = (
-            job.payload.get("ac")
-            and _ac["model"] is not None
-            and _ac["ka"] >= 0
-            and now - _ac["last"] > _ac["ka"]
-        )
-        em_due = (
-            job.payload.get("em")
-            and _em["model"] is not None
-            and _em["ka"] >= 0
-            and now - _em["last"] > _em["ka"]
-        )
-    for n in due:
-        print(f"[router] idle: {n} exceeded keep_alive", flush=True)
-        _evict(n)
-    if ac_due:
-        print(f"[router] idle: {AC_NAME} exceeded keep_alive", flush=True)
-        _evict_ac()
-    if em_due:
-        print(f"[router] idle: {EM_NAME} exceeded keep_alive", flush=True)
-        _evict_em()
-    if due or ac_due or em_due:
-        mx.reset_peak_memory()
+    try:
+        now = time.monotonic()
+        with _reg_lock:
+            due = [
+                n
+                for n in job.payload["names"]
+                if n in _chat and _chat[n]["ka"] >= 0 and now - _chat[n]["last"] > _chat[n]["ka"]
+            ]
+            ac_due = (
+                job.payload.get("ac")
+                and _ac["model"] is not None
+                and _ac["ka"] >= 0
+                and now - _ac["last"] > _ac["ka"]
+            )
+            em_due = (
+                job.payload.get("em")
+                and _em["model"] is not None
+                and _em["ka"] >= 0
+                and now - _em["last"] > _em["ka"]
+            )
+        for n in due:
+            print(f"[router] idle: {n} exceeded keep_alive", flush=True)
+            _evict(n)
+        if ac_due:
+            print(f"[router] idle: {AC_NAME} exceeded keep_alive", flush=True)
+            _evict_ac()
+        if em_due:
+            print(f"[router] idle: {EM_NAME} exceeded keep_alive", flush=True)
+            _evict_em()
+        if due or ac_due or em_due:
+            mx.reset_peak_memory()
+    except Exception as e:  # noqa: BLE001
+        job.out.put(("error", str(e)))
 
 
 def _run_emergency_evict(job):
@@ -2237,8 +2248,12 @@ class Handler(BaseHTTPRequestHandler):
         job = _submit(P_SHORT, "unload", {"target": target})
         if job is None:
             return self._error(503, "queue full (maxQueue)", err_code="queue_full")
-        kind, data = job.out.get()
-        freed = data if kind == "result" else []
+        kind, data = self._wait_out(job)
+        if kind is None:  # client gone (incl. while the job was still queued)
+            return
+        if kind == "error":
+            return self._error(500, data)
+        freed = data
         self._json(
             200,
             {"target": target, "unloaded": freed, "memory_before": before, "memory_after": _mem()},
@@ -2253,8 +2268,12 @@ class Handler(BaseHTTPRequestHandler):
         job = _submit(P_SHORT, "clear", {"target": target})
         if job is None:
             return self._error(503, "queue full (maxQueue)", err_code="queue_full")
-        kind, data = job.out.get()
-        cleared = data if kind == "result" else []
+        kind, data = self._wait_out(job)
+        if kind is None:  # client gone (incl. while the job was still queued)
+            return
+        if kind == "error":
+            return self._error(500, data)
+        cleared = data
         self._json(
             200,
             {"target": target, "cleared": cleared, "memory_before": before, "memory_after": _mem()},
