@@ -79,6 +79,29 @@ def test_store_ac_cache_writes_slot(clean):
     assert server._ac["pctoks"] == [1, 2, 3]
 
 
+def test_gen_fim_disabled_never_stores_ac_cache(clean, monkeypatch):
+    """issue #72: with PROMPT_CACHE off, a full gen_fim call must leave _ac["pc"]
+    untouched -- the KV cache built during generation must not be retained."""
+    monkeypatch.setattr(server, "PROMPT_CACHE", False)
+    fake_tok = type(
+        "FakeTok", (), {"encode": lambda self, s, add_special_tokens=False: [1, 2, 3]}
+    )()
+    monkeypatch.setattr(server, "ac_model", lambda: (object(), fake_tok))
+
+    class R:
+        def __init__(self, text, token):
+            self.text = text
+            self.token = token
+
+    def fake_stream_generate(model, tok, arr, **kw):
+        yield R("ok", 1)
+
+    monkeypatch.setattr(server, "stream_generate", fake_stream_generate)
+    server.gen_fim({"prompt": "x", "suffix": "y"})
+    assert server._ac["pc"] is None
+    assert server._ac["pctoks"] is None
+
+
 def test_gen_fim_stops_on_marker_split_across_tokens(clean, monkeypatch):
     """The windowed scanner (issue #54) must still catch a marker that arrives
     split across multiple stream_generate tokens, and must stop consuming

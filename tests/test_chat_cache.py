@@ -104,6 +104,30 @@ def test_reuse_cache_disabled_always_fresh(clean, monkeypatch):
     cache, suffix, reused, slot_idx = server._reuse_cache("m", model=object(), ptoks=[1, 2, 3])
     assert reused == 0
     assert suffix == [1, 2, 3]
+    assert slot_idx is None  # sentinel: caller must not _store_cache (issue #72)
+
+
+def test_reuse_cache_disabled_does_not_pay_for_slot_lookup(clean, monkeypatch):
+    """issue #72: with matching off, _reuse_cache must not even call
+    select_prompt_cache_slot -- there's no point paying for the lookup."""
+
+    def boom(*a, **kw):
+        raise AssertionError("select_prompt_cache_slot should not be called when disabled")
+
+    monkeypatch.setattr(server, "PROMPT_CACHE", False)
+    monkeypatch.setattr(server.memory_policy, "select_prompt_cache_slot", boom)
+    server._reuse_cache("m", model=object(), ptoks=[1, 2, 3])
+
+
+def test_disabled_cache_never_retains_kv_after_a_turn(clean, monkeypatch):
+    """issue #72: the actual bug -- with PROMPT_CACHE off, a full reuse+store round
+    trip (mirroring _run_chat's guard: `if slot_idx is not None: _store_cache(...)`)
+    must leave every slot untouched, i.e. no KV cache is retained in RAM."""
+    monkeypatch.setattr(server, "PROMPT_CACHE", False)
+    cache, suffix, reused, slot_idx = server._reuse_cache("m", model=object(), ptoks=[1, 2, 3])
+    if slot_idx is not None:
+        server._store_cache("m", [1, 2, 3, 4, 5], cache, slot_idx)
+    assert all(slot["pc"] is None for slot in server._chat["m"]["slots"])
 
 
 def test_store_cache_writes_chosen_slot(clean):
