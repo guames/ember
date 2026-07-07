@@ -115,8 +115,43 @@ def test_embeddings_cache_hit_skips_generate(monkeypatch):
 
     assert calls == [["new"]]  # only the uncached text hit the model
     assert vecs == [[9.0, 9.0], [3.0]]
-    assert prompt_tokens == 6 + 3
+    assert prompt_tokens == 3  # only the uncached text is tokenized/counted, not "cached" too
     assert cache.puts == [server._embed_hash("new")]  # newly embedded text gets cached
+
+
+def test_embed_cache_put_get_roundtrip(tmp_path):
+    """Vectors survive the float32 BLOB pack/unpack round-trip (issue #55)."""
+    cache = server._EmbedCache(str(tmp_path / "cache.sqlite3"))
+    vec = [1.5, -2.25, 0.0, 3.0]
+    cache.put("h1", vec)
+    assert cache.get("h1") == vec
+
+
+def test_embed_cache_miss_returns_none(tmp_path):
+    cache = server._EmbedCache(str(tmp_path / "cache.sqlite3"))
+    assert cache.get("nope") is None
+
+
+def test_embed_cache_evicts_oldest_past_size_cap(tmp_path):
+    """Once the on-disk cache exceeds its cap, the oldest (by last_used) rows are evicted first,
+    and the cache stays bounded rather than growing forever (issue #55)."""
+    cache = server._EmbedCache(str(tmp_path / "cache.sqlite3"))
+    for i in range(10):
+        cache.put(f"h{i}", [float(i)] * 64)
+    # Cap it at the size it happens to be at after 10 rows, then keep writing past that.
+    page_count, page_size = (
+        cache._conn.execute("PRAGMA page_count").fetchone()[0],
+        cache._conn.execute("PRAGMA page_size").fetchone()[0],
+    )
+    cache._max_bytes = page_count * page_size
+
+    for i in range(10, 30):
+        cache.put(f"h{i}", [float(i)] * 64)
+
+    n = cache._conn.execute("SELECT COUNT(*) FROM embeddings_v2").fetchone()[0]
+    assert 0 < n < 30  # eviction ran, but the cache isn't emptied outright
+    assert cache.get("h0") is None  # oldest entries are the ones gone
+    assert cache.get("h29") == [29.0] * 64  # most recently put entry survives
 
 
 def test_embeddings_cache_disabled_never_touches_cache(monkeypatch):

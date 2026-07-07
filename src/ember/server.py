@@ -50,6 +50,7 @@ Envs: MLX_ROUTER_PORT(8000) MLX_ROUTER_HOST(127.0.0.1) MLX_IDLE_TIMEOUT(300)
       MLX_MAX_QUEUE(32) MLX_PROMPT_CACHE(1) MLX_PROMPT_CACHE_SLOTS(2) MLX_KV_BITS(8) MLX_KV_GROUP_SIZE(64)
       MLX_KV_QUANT_START(0) MLX_PREFILL_STEP(512) MLX_WIRED_LIMIT_GB(auto by RAM)
       MLX_CACHE_LIMIT_GB(off) MLX_EMBED_CACHE(1) MLX_EMBED_CACHE_PATH(~/.cache/ember/embeddings.sqlite3)
+      MLX_EMBED_CACHE_MAX_MB(512)
       EMBER_API_KEY(off) EMBER_SHUTDOWN_TIMEOUT(30)
       EMBER_METRICS_LOG(~/.cache/ember/metrics.jsonl, "0" to disable)
       EMBER_METRICS_LOG_MAX_MB(64, "0" for unbounded) EMBER_SIZES_CACHE(~/.cache/ember/sizes.json, "0" to disable)
@@ -72,6 +73,7 @@ Observability: every chat/fim/embed request appends a JSON line (endpoint, model
     python -m ember
 """
 
+import array
 import gc
 import hashlib
 import itertools
@@ -983,30 +985,74 @@ def gen_fim(body):
     return text, usage
 
 
+_EMBED_CACHE_EVICT_CHUNK_FRACTION = 10  # evict ~1/10th of rows (by last_used) once over cap
+
+
 class _EmbedCache:
     """On-disk content-hash -> embedding cache (sqlite3, stdlib only). Repeated indexing runs
-    (e.g. `ledger recall`) skip the forward pass entirely for text already embedded."""
+    (e.g. `ledger recall`) skip the forward pass entirely for text already embedded.
 
-    def __init__(self, path):
+    Vectors are stored as float32 BLOBs in `embeddings_v2` (~4x smaller than the old JSON-TEXT
+    `embeddings` table, and no json encode/decode per hit). Not migrated in place -- since this
+    is a cache and not a source of truth, old-schema entries are simply re-embedded and re-cached
+    under the new schema on next use. Size-capped via MLX_EMBED_CACHE_MAX_MB: a cheap
+    PRAGMA-based size check runs on every put, and once over cap the oldest rows (by last_used)
+    are evicted in one shot."""
+
+    def __init__(self, path, max_mb=None):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.execute(
-            "CREATE TABLE IF NOT EXISTS embeddings (hash TEXT PRIMARY KEY, vec TEXT)"
+            "CREATE TABLE IF NOT EXISTS embeddings_v2 "
+            "(hash TEXT PRIMARY KEY, vec BLOB, last_used REAL)"
+        )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS embeddings_v2_last_used ON embeddings_v2 (last_used)"
         )
         self._conn.commit()
         self._lock = threading.Lock()
+        if max_mb is None:
+            max_mb = float(os.environ.get("MLX_EMBED_CACHE_MAX_MB", "512"))
+        self._max_bytes = max_mb * 1024 * 1024
 
     def get(self, h):
         with self._lock:
-            row = self._conn.execute("SELECT vec FROM embeddings WHERE hash = ?", (h,)).fetchone()
-        return json.loads(row[0]) if row else None
-
-    def put(self, h, vec):
-        with self._lock:
+            row = self._conn.execute(
+                "SELECT vec FROM embeddings_v2 WHERE hash = ?", (h,)
+            ).fetchone()
+            if row is None:
+                return None
             self._conn.execute(
-                "INSERT OR REPLACE INTO embeddings (hash, vec) VALUES (?, ?)", (h, json.dumps(vec))
+                "UPDATE embeddings_v2 SET last_used = ? WHERE hash = ?", (time.time(), h)
             )
             self._conn.commit()
+        arr = array.array("f")
+        arr.frombytes(row[0])
+        return arr.tolist()
+
+    def put(self, h, vec):
+        blob = array.array("f", vec).tobytes()
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO embeddings_v2 (hash, vec, last_used) VALUES (?, ?, ?)",
+                (h, blob, time.time()),
+            )
+            self._conn.commit()
+            self._evict_if_over_cap()
+
+    def _evict_if_over_cap(self):
+        page_count = self._conn.execute("PRAGMA page_count").fetchone()[0]
+        page_size = self._conn.execute("PRAGMA page_size").fetchone()[0]
+        if page_count * page_size <= self._max_bytes:
+            return
+        n = self._conn.execute("SELECT COUNT(*) FROM embeddings_v2").fetchone()[0]
+        chunk = max(1, n // _EMBED_CACHE_EVICT_CHUNK_FRACTION)
+        self._conn.execute(
+            "DELETE FROM embeddings_v2 WHERE hash IN "
+            "(SELECT hash FROM embeddings_v2 ORDER BY last_used ASC LIMIT ?)",
+            (chunk,),
+        )
+        self._conn.commit()
 
 
 _embed_cache_singleton = None
@@ -1030,9 +1076,6 @@ def embeddings(texts):
     if not texts:
         return [], 0
 
-    tok_ids = [proc.encode(t, truncation=True, max_length=512) for t in texts]
-    prompt_tokens = sum(len(ids) for ids in tok_ids)
-
     cache = _embed_cache() if EMBED_CACHE else None
     vecs = [None] * len(texts)
     pending = {}  # content hash -> indices sharing that exact text (dedups repeats in-batch too)
@@ -1044,15 +1087,27 @@ def embeddings(texts):
         else:
             pending.setdefault(h, []).append(i)
 
+    prompt_tokens = 0
     if pending:
+        # Tokenize only what the cache didn't already have -- a fully-cached batch (the common
+        # re-index case) skips tokenization entirely, and prompt_tokens reflects only what was
+        # actually processed instead of counting cached texts too.
+        pending_tok_ids = {
+            h: proc.encode(texts[idxs[0]], truncation=True, max_length=512)
+            for h, idxs in pending.items()
+        }
+        # Every occurrence of a pending text counts toward usage, not just one per distinct hash
+        # (in-batch dedup only skips the redundant forward passes, not the reported token count).
+        prompt_tokens = sum(len(pending_tok_ids[h]) * len(idxs) for h, idxs in pending.items())
+
         # mlx_embeddings.generate pads to the longest text in the batch; pooling/normalization
         # over the padded positions yields all-NaN embeddings for the shorter texts (and
         # json.dumps then emits the bare literal `NaN`, invalid JSON for strict clients).
         # Bucketing by exact tokenized length before batching sidesteps the padding entirely —
         # every text in a bucket is the same length, so there is nothing to pad. See issue #5.
         buckets = {}
-        for h, idxs in pending.items():
-            buckets.setdefault(len(tok_ids[idxs[0]]), []).append(h)
+        for h in pending:
+            buckets.setdefault(len(pending_tok_ids[h]), []).append(h)
         for hs in buckets.values():
             batch_texts = [texts[pending[h][0]] for h in hs]
             out = mlx_embeddings.generate(model, proc, batch_texts).text_embeds.tolist()
